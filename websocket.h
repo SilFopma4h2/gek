@@ -24,4 +24,5 @@ private:
     std::string api_secret_;
     std::vector<std::string> symbols_;
     QuoteCallback callback_;
+    bool connectAndListen();
 };

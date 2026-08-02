@@ -2,3 +2,6 @@ build/
 *.o
 *.out
 .idea/
+
+gek/
+todo.txt
