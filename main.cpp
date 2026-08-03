@@ -13,6 +13,8 @@
 //Hier de confg
 const std::string symbol = "SPY";
 const int TICKS_PER_DECISION = 60;
+//Hier zet je aan of je een order wil plaatsen.
+const bool orderyes = false;
 
 // TP/SL als multiplier van de gemiddelde spread over het venster (volatiliteit-gebaseerd).
 // R:R van 2:1 (TP verder weg dan SL).
@@ -104,7 +106,15 @@ std::string majoritySignal(const std::vector<std::string>& signals) {
 
 // Plaatst een bracket order (TP/SL) o.b.v. het meerderheidssignaal en de
 // gemiddelde spread over het venster als volatiliteitsmaat.
+
 void order(const std::string& signal) {
+    // Check eerst of orders aan staan
+    if (!orderyes) {
+        std::cout << "orders zijn uitgeschakeld, geen orders geplaatst\n";
+        return; // Breekt de functie af
+    }
+
+    // Code komt pas hier als orderyes true is, geen extra if meer nodig
     double avgSpread = spreadSum / TICKS_PER_DECISION;
 
     if (signal == "BUY") {
