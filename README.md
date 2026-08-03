@@ -1,5 +1,7 @@
 # gek
 
+De naam gek komt van dat het makkelijker te zoeken is met cd gek in plaats van een lange naam.
+
 Een C++ trading bot die real-time quotes van Alpaca's websocket-feed verwerkt, een koop/verkoop-signaal berekent op basis van orderboek-onbalans, en (optioneel) automatisch orders plaatst via de Alpaca REST API.
 
 ## Overzicht

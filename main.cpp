@@ -1,6 +1,8 @@
 #include <iostream>
 #include <cmath>
 #include <deque>
+#include <vector>
+#include <map>
 #include "websocket.h"
 #include <cstdlib>
 #include <thread>
@@ -10,6 +12,12 @@
 #include "order.h"
 //Hier de confg
 const std::string symbol = "SPY";
+const int TICKS_PER_DECISION = 60;
+
+// TP/SL als multiplier van de gemiddelde spread over het venster (volatiliteit-gebaseerd).
+// R:R van 2:1 (TP verder weg dan SL).
+const double TP_SPREAD_MULTIPLIER = 3.0;
+const double SL_SPREAD_MULTIPLIER = 1.5;
 
 struct OrderBook {
     double bid;
@@ -25,7 +33,10 @@ static std::mutex bookMutex;
 static std::condition_variable bookCv;
 static bool newDataAvailable = false;
 
-
+// Buffer voor de meerderheids-beslissing over TICKS_PER_DECISION signalen.
+static std::vector<std::string> signalBuffer;
+static double spreadSum = 0.0;
+static double lastMid = 0.0;
 
 // Functie die het signaal bepaalt op basis van 1 enkele quote
 std::string evaluateSignal(const OrderBook& book) {
@@ -45,53 +56,75 @@ std::string evaluateSignal(const OrderBook& book) {
     double Ratio;
     Ratio = (double)book.bid_volume / (book.bid_volume + book.ask_volume);
 
-
     // Print de basisdata
     std::cout << "Bid: " << book.bid << " | Ask: " << book.ask << " | Spread: " << spread << "\n";
     std::cout << "Mid: " << mid << " | Weighted Mid: " << wmid << "\n";
 
+    // Bijhouden voor de meerderheids-beslissing
+    spreadSum += spread;
+    lastMid = mid;
+
     // 2. Signaal logica (Gebaseerd op Weighted Mid vs Mid)
-    // Als Wmid > Mid: er staat meer volume aan de bid kant (kopersdruk) -> KOOP signaal
-    // Als Wmid < Mid: er staat meer volume aan de ask kant (verkopersdruk) -> VERKOOP signaal
     std::cout << "SIGNAL: ";
     if (wmid > mid && Ratio > 0.60) {
-    //Voor een beter signaal pakken we de Ratio er ook bij.
         std::cout << " BUY  (Kopersdruk dominant)\n";
         return "BUY";
     }
-    //Else if functie word aangeroepen als ALLEEN als return "BUY" false is dus als wmid < mid dan worden de volgende statements gepakt.
     else if (wmid < mid && Ratio < 0.40) {
         std::cout << " SELL  (Verkopersdruk dominant)\n";
         return "SELL";
-
     } else {
         std::cout << "NEUTRAAL (Volumes in balans)\n";
         return "NEUTRAAL";
     }
-
-
-
-
 }
 
-//Blokje voor de orders
-void order(std::string& signal) {
+// Telt welk signaal het vaakst voorkwam in de buffer.
+std::string majoritySignal(const std::vector<std::string>& signals) {
+    std::map<std::string, int> counts;
+    for (const auto& s : signals) counts[s]++;
+
+    std::string best = "NEUTRAAL";
+    int bestCount = -1;
+    for (const auto& [sig, count] : counts) {
+        if (count > bestCount) {
+            bestCount = count;
+            best = sig;
+        }
+    }
+
+    std::cout << "== Telling laatste " << signals.size() << " signalen: "
+              << "BUY=" << counts["BUY"]
+              << " SELL=" << counts["SELL"]
+              << " NEUTRAAL=" << counts["NEUTRAAL"]
+              << " => Meerderheid: " << best << " ==\n";
+
+    return best;
+}
+
+// Plaatst een bracket order (TP/SL) o.b.v. het meerderheidssignaal en de
+// gemiddelde spread over het venster als volatiliteitsmaat.
+void order(const std::string& signal) {
+    double avgSpread = spreadSum / TICKS_PER_DECISION;
+
     if (signal == "BUY") {
-        sendOrder(symbol, "buy", "0.01");
+        double tp = lastMid + TP_SPREAD_MULTIPLIER * avgSpread;
+        double sl = lastMid - SL_SPREAD_MULTIPLIER * avgSpread;
+        std::cout << "-> BUY order: qty=1, TP=" << tp << " SL=" << sl
+                  << " (avgSpread=" << avgSpread << ")\n";
+        sendBracketOrder(symbol, "buy", "1", tp, sl);
     }
     else if (signal == "SELL") {
-        sendOrder(symbol, "sell", "0.01");
-    }
-    else if (signal == "NEUTRAAL") {
-        std::cout << "Geen order. Markt op break even\n";
+        double tp = lastMid - TP_SPREAD_MULTIPLIER * avgSpread;
+        double sl = lastMid + SL_SPREAD_MULTIPLIER * avgSpread;
+        std::cout << "-> SELL order: qty=1, TP=" << tp << " SL=" << sl
+                  << " (avgSpread=" << avgSpread << ")\n";
+        sendBracketOrder(symbol, "sell", "1", tp, sl);
     }
     else {
-        std::cout << "Oei een error";
+        std::cout << "Geen order. Meerderheid was NEUTRAAL\n";
     }
-
-
 }
-
 
 void startAlpacaFeed() {
     const char* key    = std::getenv("ALPACA_API_KEY");
@@ -101,7 +134,6 @@ void startAlpacaFeed() {
         return;
     }
 
-    //Ticker stt=aat bovenaan.
     AlpacaWebSocket client(key, secret, {symbol});
 
     client.setQuoteCallback([](double bid, double ask,
@@ -131,20 +163,26 @@ int main() {
         bookCv.wait(lock, [] { return newDataAvailable; });
         newDataAvailable = false;
 
-        // Pak alleen de laatste quote uit de vector
         if (!Apple_Book_Data.empty()) {
             OrderBook latestBook = Apple_Book_Data.back();
-
-            // Ontgrendel de mutex voordat we gaan printen/rekenen
-            // zodat de WebSocket thread niet geblokkeerd wordt
             lock.unlock();
 
             std::cout << "\n-- Nieuwe quote binnengekomen --\n";
-            evaluateSignal(latestBook);
+            std::string signal = evaluateSignal(latestBook);
+            signalBuffer.push_back(signal);
+
+            if ((int)signalBuffer.size() >= TICKS_PER_DECISION) {
+                std::string decision = majoritySignal(signalBuffer);
+                order(decision);
+
+                // Reset venster voor de volgende 60 ticks
+                signalBuffer.clear();
+                spreadSum = 0.0;
+            }
         } else {
             lock.unlock();
         }
     }
 
-return 0;
+    return 0;
 }
