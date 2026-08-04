@@ -89,13 +89,27 @@ void sendOrder(const std::string& symbol, const std::string& side, const std::st
 void sendBracketOrder(const std::string& symbol,
                        const std::string& side,
                        const std::string& qty,
+                       double entryPrice,
                        double takeProfitPrice,
                        double stopLossPrice) {
+    // Zorg dat TP/SL in de juiste richting minimaal één tick (0.01) van de
+    // entry afliggen, zodat de geformatteerde prijzen nooit samenvallen en
+    // Alpaca de bracket order niet afwijst vanwege gelijke TP/SL.
+    const double MIN_STEP = 0.01;
+    if (side == "buy") {
+        if (takeProfitPrice < entryPrice + MIN_STEP) takeProfitPrice = entryPrice + MIN_STEP;
+        if (stopLossPrice > entryPrice - MIN_STEP) stopLossPrice = entryPrice - MIN_STEP;
+    } else if (side == "sell") {
+        if (takeProfitPrice > entryPrice - MIN_STEP) takeProfitPrice = entryPrice - MIN_STEP;
+        if (stopLossPrice < entryPrice + MIN_STEP) stopLossPrice = entryPrice + MIN_STEP;
+    }
+
     nlohmann::json body = {
         {"symbol", symbol},
         {"qty", qty},
         {"side", side},
-        {"type", "market"},
+        {"type", "limit"},
+        {"limit_price", formatPrice(entryPrice)},
         {"time_in_force", "day"},
         {"order_class", "bracket"},
         {"take_profit", {{"limit_price", formatPrice(takeProfitPrice)}}},

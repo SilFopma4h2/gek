@@ -10,6 +10,7 @@
 #include <iostream>
 #include <thread>
 #include <chrono>
+#include <algorithm>
 
 namespace beast = boost::beast;
 namespace websocket = beast::websocket;
@@ -37,9 +38,15 @@ void AlpacaWebSocket::setQuoteCallback(QuoteCallback cb) {
     callback_ = std::move(cb);
 }
 
+void AlpacaWebSocket::stop() {
+    stop_requested_.store(true);
+}
+
 // Eén enkele connectiepoging. Retourneert wanneer de verbinding
 // (normaal of door fout) eindigt.
 bool AlpacaWebSocket::connectAndListen() {
+    if (stop_requested_.load()) return false;
+
     try {
         net::io_context ioc;
         ssl::context ctx{ssl::context::tlsv12_client};
@@ -65,6 +72,13 @@ bool AlpacaWebSocket::connectAndListen() {
             }));
         ws.handshake(ALPACA_HOST, ALPACA_PATH);
 
+        // Idle-timeout zodat een blokkerende read kan worden onderbroken voor
+        // een nette shutdown en de verbinding nooit voor altijd blijft hangen.
+        websocket::stream_base::timeout timeout_opt;
+        timeout_opt.handshake_timeout = std::chrono::seconds(30);
+        timeout_opt.idle_timeout = std::chrono::seconds(5);
+        ws.set_option(timeout_opt);
+
         json auth_msg = {
             {"action", "auth"},
             {"key", api_key_},
@@ -72,14 +86,52 @@ bool AlpacaWebSocket::connectAndListen() {
         };
         ws.write(net::buffer(auth_msg.dump()));
 
+        // Wacht op het auth-resultaat vóór we subscriben, zodat foutieve
+        // credentials direct zichtbaar zijn i.p.v. in een eindeloze retry-loop.
+        beast::flat_buffer buffer;
+        bool authenticated = false;
+        while (ws.is_open() && !authenticated && !stop_requested_.load()) {
+            buffer.clear();
+            ws.read(buffer);
+            std::string msg = beast::buffers_to_string(buffer.data());
+
+            json parsed;
+            try {
+                parsed = json::parse(msg);
+            } catch (...) {
+                continue;
+            }
+
+            if (!parsed.is_array()) continue;
+
+            for (auto& evt : parsed) {
+                if (!evt.contains("T")) continue;
+                std::string type = evt["T"];
+
+                if (type == "error") {
+                    std::cerr << "Alpaca error: " << evt.dump() << "\n";
+                    return false;
+                } else if (type == "success") {
+                    std::cout << "Alpaca status: " << evt.dump() << "\n";
+                    if (evt.value("msg", "").find("authenticated") != std::string::npos) {
+                        authenticated = true;
+                    }
+                }
+            }
+        }
+
+        if (!authenticated) {
+            std::cerr << "Authenticatie bij Alpaca mislukt\n";
+            return false;
+        }
+
         json sub_msg = {
             {"action", "subscribe"},
             {"quotes", symbols_}
         };
         ws.write(net::buffer(sub_msg.dump()));
 
-        beast::flat_buffer buffer;
-        while (ws.is_open()) {
+        while (ws.is_open() && !stop_requested_.load()) {
             buffer.clear();
             ws.read(buffer);
             std::string msg = beast::buffers_to_string(buffer.data());
@@ -115,7 +167,9 @@ bool AlpacaWebSocket::connectAndListen() {
         }
         return true; // verbinding netjes gesloten
     } catch (std::exception const& e) {
-        std::cerr << "WebSocket fout: " << e.what() << "\n";
+        if (!stop_requested_.load()) {
+            std::cerr << "WebSocket fout: " << e.what() << "\n";
+        }
         return false; // fout, caller moet reconnecten
     }
 }
@@ -123,16 +177,21 @@ bool AlpacaWebSocket::connectAndListen() {
 void AlpacaWebSocket::run() {
     int backoff = INITIAL_BACKOFF_SECONDS;
 
-    while (true) {
+    while (!stop_requested_.load()) {
         std::cout << "Verbinden met Alpaca websocket...\n";
         bool cleanExit = connectAndListen();
+
+        if (stop_requested_.load()) break;
 
         if (cleanExit) {
             backoff = INITIAL_BACKOFF_SECONDS; // reset backoff na succesvolle sessie
         }
 
         std::cerr << "Verbinding verbroken, reconnect over " << backoff << "s...\n";
-        std::this_thread::sleep_for(std::chrono::seconds(backoff));
+        // Sleep in stappen zodat stop() direct wordt opgepikt.
+        for (int waited = 0; waited < backoff && !stop_requested_.load(); ++waited) {
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+        }
         backoff = std::min(backoff * 2, MAX_BACKOFF_SECONDS);
     }
 }

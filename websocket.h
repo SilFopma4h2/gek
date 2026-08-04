@@ -1,6 +1,8 @@
 #pragma once
 #include <string>
+#include <vector>
 #include <functional>
+#include <atomic>
 
 // Callback-signatuur: bid, ask, bid_volume, ask_volume
 // Zo blijft deze module onafhankelijk van de OrderBook-struct in main.cpp
@@ -19,10 +21,14 @@ public:
     // Blokkerende call: opent verbinding, auth, subscribe, en verwerkt events
     void run();
 
+    // Vraagt een nette shutdown aan; run() stopt binnenkort (max. een paar seconden).
+    void stop();
+
 private:
     std::string api_key_;
     std::string api_secret_;
     std::vector<std::string> symbols_;
     QuoteCallback callback_;
+    std::atomic<bool> stop_requested_{false};
     bool connectAndListen();
 };

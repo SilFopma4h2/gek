@@ -9,6 +9,8 @@
 #include <mutex>
 #include <condition_variable>
 #include <string>
+#include <chrono>
+#include <csignal>
 #include "order.h"
 //Hier de confg
 const std::string symbol = "SPY";
@@ -40,6 +42,12 @@ static std::vector<std::string> signalBuffer;
 static double spreadSum = 0.0;
 static double lastMid = 0.0;
 
+// Nette shutdown via SIGINT/SIGTERM.
+static volatile std::sig_atomic_t g_stop = 0;
+static void handleSignal(int) {
+    g_stop = 1;
+}
+
 // Functie die het signaal bepaalt op basis van 1 enkele quote
 std::string evaluateSignal(const OrderBook& book) {
     // 1. Basis berekeningen
@@ -55,8 +63,11 @@ std::string evaluateSignal(const OrderBook& book) {
     }
 
     //Nu maken we de Ratio formule en die sluit perfect aan op Wpm.
-    double Ratio;
-    Ratio = (double)book.bid_volume / (book.bid_volume + book.ask_volume);
+    //Veiligheidscheck om NaN te voorkomen bij zero volumes (net als bij wmid).
+    double Ratio = 0.0;
+    if ((book.bid_volume + book.ask_volume) > 0) {
+        Ratio = (double)book.bid_volume / (book.bid_volume + book.ask_volume);
+    }
 
     // Print de basisdata
     std::cout << "Bid: " << book.bid << " | Ask: " << book.ask << " | Spread: " << spread << "\n";
@@ -106,6 +117,8 @@ std::string majoritySignal(const std::vector<std::string>& signals) {
 
 // Plaatst een bracket order (TP/SL) o.b.v. het meerderheidssignaal en de
 // gemiddelde spread over het venster als volatiliteitsmaat.
+// Entry is een limit order op de actuele mid-price, zodat TP/SL aan een
+// bekende instapprijs verankerd zijn (i.p.v. aan een onbekende markt-fill).
 
 void order(const std::string& signal) {
     // Check eerst of orders aan staan
@@ -116,32 +129,37 @@ void order(const std::string& signal) {
 
     // Code komt pas hier als orderyes true is, geen extra if meer nodig
     double avgSpread = spreadSum / TICKS_PER_DECISION;
+    double entry = lastMid;
 
     if (signal == "BUY") {
-        double tp = lastMid + TP_SPREAD_MULTIPLIER * avgSpread;
-        double sl = lastMid - SL_SPREAD_MULTIPLIER * avgSpread;
-        std::cout << "-> BUY order: qty=1, TP=" << tp << " SL=" << sl
+        double tp = entry + TP_SPREAD_MULTIPLIER * avgSpread;
+        double sl = entry - SL_SPREAD_MULTIPLIER * avgSpread;
+        std::cout << "-> BUY limit+bracket: entry=" << entry
+                  << " qty=1, TP=" << tp << " SL=" << sl
                   << " (avgSpread=" << avgSpread << ")\n";
-        sendBracketOrder(symbol, "buy", "1", tp, sl);
+        sendBracketOrder(symbol, "buy", "1", entry, tp, sl);
     }
     else if (signal == "SELL") {
-        double tp = lastMid - TP_SPREAD_MULTIPLIER * avgSpread;
-        double sl = lastMid + SL_SPREAD_MULTIPLIER * avgSpread;
-        std::cout << "-> SELL order: qty=1, TP=" << tp << " SL=" << sl
+        double tp = entry - TP_SPREAD_MULTIPLIER * avgSpread;
+        double sl = entry + SL_SPREAD_MULTIPLIER * avgSpread;
+        std::cout << "-> SELL limit+bracket: entry=" << entry
+                  << " qty=1, TP=" << tp << " SL=" << sl
                   << " (avgSpread=" << avgSpread << ")\n";
-        sendBracketOrder(symbol, "sell", "1", tp, sl);
+        sendBracketOrder(symbol, "sell", "1", entry, tp, sl);
     }
     else {
         std::cout << "Geen order. Meerderheid was NEUTRAAL\n";
     }
 }
 
-void startAlpacaFeed() {
+int main() {
+    std::ios::sync_with_stdio(false);
+
     const char* key    = std::getenv("ALPACA_API_KEY");
     const char* secret = std::getenv("ALPACA_API_SECRET");
     if (!key || !secret) {
         std::cerr << "ALPACA_API_KEY / ALPACA_API_SECRET niet gezet\n";
-        return;
+        return 1;
     }
 
     AlpacaWebSocket client(key, secret, {symbol});
@@ -159,18 +177,19 @@ void startAlpacaFeed() {
         bookCv.notify_one();
     });
 
-    client.run();
-}
+    std::signal(SIGINT, handleSignal);
+    std::signal(SIGTERM, handleSignal);
 
-int main() {
-    std::ios::sync_with_stdio(false);
+    std::thread feed_thread([&client] { client.run(); });
 
-    std::thread feed_thread(startAlpacaFeed);
-    feed_thread.detach();
-
-    while (true) {
+    while (g_stop == 0) {
         std::unique_lock<std::mutex> lock(bookMutex);
-        bookCv.wait(lock, [] { return newDataAvailable; });
+        bookCv.wait_for(lock, std::chrono::milliseconds(200),
+                        [] { return newDataAvailable || g_stop != 0; });
+
+        if (g_stop != 0) break;
+        if (!newDataAvailable) continue; // timeout/spurious wake, wacht op echte data
+
         newDataAvailable = false;
 
         if (!Apple_Book_Data.empty()) {
@@ -194,5 +213,8 @@ int main() {
         }
     }
 
+    client.stop();
+    feed_thread.join();
+    std::cout << "gek gestopt.\n";
     return 0;
 }
