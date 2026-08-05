@@ -24,3 +24,45 @@ target_link_libraries(gek PRIVATE
         Threads::Threads
         CURL::libcurl
 )
+
+# --- GUI (gek_gui): Dear ImGui + GLFW + OpenGL. Alleen als de deps aanwezig
+# zijn, zodat de console-build op systemen zonder GUI werkt. ----------------
+find_package(PkgConfig QUIET)
+find_package(OpenGL QUIET)
+if(PkgConfig_FOUND)
+    pkg_check_modules(GLFW QUIET IMPORTED_TARGET glfw3)
+endif()
+
+if(GLFW_FOUND AND OpenGL_FOUND)
+    set(IMGUI_SOURCES
+            imgui/imgui.cpp
+            imgui/imgui_draw.cpp
+            imgui/imgui_tables.cpp
+            imgui/imgui_widgets.cpp
+            imgui/backends/imgui_impl_glfw.cpp
+            imgui/backends/imgui_impl_opengl3.cpp
+    )
+
+    add_executable(gek_gui gui.cpp
+            websocket.h
+            websocket.cpp
+            order.cpp
+            order.h
+            ${IMGUI_SOURCES})
+
+    target_include_directories(gek_gui PRIVATE imgui imgui/backends)
+
+    target_link_libraries(gek_gui PRIVATE
+            Boost::system
+            OpenSSL::SSL
+            OpenSSL::Crypto
+            nlohmann_json::nlohmann_json
+            Threads::Threads
+            CURL::libcurl
+            PkgConfig::GLFW
+            OpenGL::GL
+            dl
+    )
+else()
+    message(WARNING "GLFW/OpenGL niet gevonden; gek_gui wordt niet gebouwd.")
+endif()

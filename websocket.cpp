@@ -38,14 +38,24 @@ void AlpacaWebSocket::setQuoteCallback(QuoteCallback cb) {
     callback_ = std::move(cb);
 }
 
+void AlpacaWebSocket::setStatusCallback(StatusCallback cb) {
+    status_cb_ = std::move(cb);
+}
+
 void AlpacaWebSocket::stop() {
     stop_requested_.store(true);
+}
+
+void AlpacaWebSocket::notifyStatus(const std::string& msg) const {
+    if (status_cb_) status_cb_(msg);
 }
 
 // Eén enkele connectiepoging. Retourneert wanneer de verbinding
 // (normaal of door fout) eindigt.
 bool AlpacaWebSocket::connectAndListen() {
     if (stop_requested_.load()) return false;
+
+    notifyStatus("Verbinden met " + ALPACA_HOST + "...");
 
     try {
         net::io_context ioc;
@@ -71,6 +81,7 @@ bool AlpacaWebSocket::connectAndListen() {
                 req.set(beast::http::field::user_agent, "hft-orderbook-sim");
             }));
         ws.handshake(ALPACA_HOST, ALPACA_PATH);
+        notifyStatus("WebSocket verbonden, authenticatie...");
 
         // Idle-timeout zodat een blokkerende read kan worden onderbroken voor
         // een nette shutdown en de verbinding nooit voor altijd blijft hangen.
@@ -110,9 +121,11 @@ bool AlpacaWebSocket::connectAndListen() {
 
                 if (type == "error") {
                     std::cerr << "Alpaca error: " << evt.dump() << "\n";
+                    notifyStatus("Alpaca fout: " + evt.dump());
                     return false;
                 } else if (type == "success") {
                     std::cout << "Alpaca status: " << evt.dump() << "\n";
+                    notifyStatus("Alpaca: " + evt.dump());
                     if (evt.value("msg", "").find("authenticated") != std::string::npos) {
                         authenticated = true;
                     }
@@ -122,8 +135,18 @@ bool AlpacaWebSocket::connectAndListen() {
 
         if (!authenticated) {
             std::cerr << "Authenticatie bij Alpaca mislukt\n";
+            notifyStatus("Authenticatie mislukt");
             return false;
         }
+
+        notifyStatus("Geauthenticeerd, abonneren op: " + [this]() {
+            std::string s;
+            for (size_t i = 0; i < symbols_.size(); ++i) {
+                if (i) s += ", ";
+                s += symbols_[i];
+            }
+            return s;
+        }());
 
         json sub_msg = {
             {"action", "subscribe"},
@@ -160,8 +183,10 @@ bool AlpacaWebSocket::connectAndListen() {
                     }
                 } else if (type == "error") {
                     std::cerr << "Alpaca error: " << evt.dump() << "\n";
+                    notifyStatus("Alpaca fout: " + evt.dump());
                 } else if (type == "success" || type == "subscription") {
                     std::cout << "Alpaca status: " << evt.dump() << "\n";
+                    notifyStatus("Alpaca: " + evt.dump());
                 }
             }
         }
@@ -169,6 +194,7 @@ bool AlpacaWebSocket::connectAndListen() {
     } catch (std::exception const& e) {
         if (!stop_requested_.load()) {
             std::cerr << "WebSocket fout: " << e.what() << "\n";
+            notifyStatus("WebSocket fout: " + std::string(e.what()));
         }
         return false; // fout, caller moet reconnecten
     }
@@ -179,6 +205,7 @@ void AlpacaWebSocket::run() {
 
     while (!stop_requested_.load()) {
         std::cout << "Verbinden met Alpaca websocket...\n";
+        notifyStatus("Reconnect over " + std::to_string(backoff) + "s...");
         bool cleanExit = connectAndListen();
 
         if (stop_requested_.load()) break;
@@ -188,6 +215,7 @@ void AlpacaWebSocket::run() {
         }
 
         std::cerr << "Verbinding verbroken, reconnect over " << backoff << "s...\n";
+        notifyStatus("Verbinding verbroken");
         // Sleep in stappen zodat stop() direct wordt opgepikt.
         for (int waited = 0; waited < backoff && !stop_requested_.load(); ++waited) {
             std::this_thread::sleep_for(std::chrono::seconds(1));

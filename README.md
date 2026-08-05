@@ -12,11 +12,13 @@ Een C++ trading bot die real-time quotes van Alpaca's websocket-feed verwerkt, e
 
 | Bestand | Verantwoordelijkheid |
 |---|---|
-| `main.cpp` | Entry point, orderbook-opslag, signaallogica, threading |
+| `main.cpp` | Entry point (console-versie), orderbook-opslag, signaallogica, threading |
+| `gui.cpp` | Entry point GUI-versie (`gek_gui`); bevat alle logica uit `main.cpp` in een Dear ImGui interface |
 | `websocket.h` / `websocket.cpp` | Verbinding, authenticatie en subscriptie op Alpaca's websocket (Boost.Beast + OpenSSL) |
 | `order.h` / `order.cpp` | Order plaatsen via Alpaca REST API (libcurl) |
+| `imgui/` | Vendored Dear ImGui (GLFW + OpenGL backends) |
 | `CMakeLists.txt` | Build-configuratie |
-| `build.sh` | Build- en run-script |
+| `build.sh` | Build- en run-script (console-versie) |
 
 ### Dataflow
 
@@ -74,12 +76,36 @@ Handmatig:
 ```bash
 cmake -S . -B build
 cmake --build build
-./build/gek
+./build/gek            # console-versie
+./build/gek_gui        # GUI-versie
 ```
+
+## GUI (`gek_gui`)
+
+Een Dear ImGui + GLFW + OpenGL interface met alle functionaliteit uit `main.cpp`:
+
+- **Verbinding & Instellingen**: symbool (aanpasbaar), Connect/Disconnect, API-key status, `orderyes`-toggle, TP/SL multipliers en het beslissingsinterval (minuten).
+- **Markt Data**: live bid/ask/spread/mid/weighted mid/bid-ratio, volume-balk en een mid-price-sparkline.
+- **Signalen**: huidig signaal, tellingen per signaal in het lopende venster, aftelklok tot de volgende beslissing en een "Beslis nu"-knop.
+- **Beslissingen**: tabel met recente beslissingen (tijd, meerderheid, entry/TP/SL, order-status).
+- **Log**: scrollende, gekleurde log (feed-status, quotes, beslissingen, orderresultaten) met autoscroll en een "log elke quote"-toggle.
+
+De beslissing wordt, net als in `main.cpp`, genomen zodra het interval (standaard 5 minuten) is verstreken; het meerderheidssignaal bepaalt dan of er een bracket order wordt geplaatst. Orders lopen op een aparte thread zodat de UI responsief blijft.
+
+## WSL2
+
+`gek_gui` is **WSL2-proof**: hij draait op WSLg (X11/Wayland) via GLFW + OpenGL (Mesa). Als er geen display beschikbaar is (geen WSLg / geen X-server), geeft hij een duidelijke foutmelding en sluit netjes af. Vereisten:
+
+```bash
+sudo apt install libglfw3-dev libgl1-mesa-dev libcurl4-openssl-dev libssl-dev \
+     libboost-system-dev nlohmann-json3-dev
+```
+
+Run de GUI vanuit een interactieve WSL-shell (zodat `DISPLAY` is gezet), start WSLg of een X-server, en voer `./build/gek_gui` uit.
 
 ## Configuratie
 
-- Het te volgen symbool staat hardcoded in `main.cpp` (`const std::string symbol = "SPY";`).
+- In de console-versie (`main.cpp`) staat het symbool hardcoded (`const std::string symbol = "SPY";`); in de GUI is dit via het paneel aanpasbaar.
 - De API endpoint in `order.cpp` wijst naar de **paper trading** omgeving van Alpaca (`paper-api.alpaca.markets`), dus orders worden niet met echt geld uitgevoerd.
 
 ## Bekende aandachtspunten

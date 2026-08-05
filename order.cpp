@@ -17,11 +17,24 @@
 #include <curl/curl.h>
 
 namespace {
+// Optionele UI log-callback (get voor de GUI; zie setOrderLogCallback).
+OrderLogCallback g_orderLogCb;
+
 // Helper om een prijs netjes op 2 decimalen te formatteren (Alpaca eist dit).
 std::string formatPrice(double price) {
     std::ostringstream oss;
     oss << std::fixed << std::setprecision(2) << price;
     return oss.str();
+}
+
+void logOrder(const std::string& msg, bool isError) {
+    if (g_orderLogCb) {
+        g_orderLogCb(msg, isError);
+    } else if (isError) {
+        std::cerr << msg << "\n";
+    } else {
+        std::cout << msg << "\n";
+    }
 }
 
 // Gedeelde logica om een order-body naar Alpaca te sturen.
@@ -63,17 +76,21 @@ void postOrder(const nlohmann::json& body) {
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &httpCode);
 
     if (res != CURLE_OK) {
-        std::cerr << "Order fout (curl): " << curl_easy_strerror(res) << "\n";
+        logOrder("Order fout (curl): " + std::string(curl_easy_strerror(res)), true);
     } else if (httpCode >= 400) {
-        std::cerr << "Order fout (HTTP " << httpCode << "): " << responseBuffer << "\n";
+        logOrder("Order fout (HTTP " + std::to_string(httpCode) + "): " + responseBuffer, true);
     } else {
-        std::cout << "Order geplaatst: " << responseBuffer << "\n";
+        logOrder("Order geplaatst: " + responseBuffer, false);
     }
 
     curl_slist_free_all(headers);
     curl_easy_cleanup(curl);
 }
 } // namespace
+
+void setOrderLogCallback(OrderLogCallback cb) {
+    g_orderLogCb = std::move(cb);
+}
 
 void sendOrder(const std::string& symbol, const std::string& side, const std::string& qty) {
     nlohmann::json body = {
