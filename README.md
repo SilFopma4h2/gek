@@ -2,7 +2,7 @@
 
 A C++ trading bot. It reads live quotes from Alpaca's websocket feed, works out a buy/sell signal from order-book imbalance, and can place orders automatically via the Alpaca REST API.
 
-The name is a nod to both the flow of market data and C++.
+The name is a nod to both the flow of market data and C++. The project is called **Flow++**, but GitHub doesn't allow a `+` in repo names, so the repo itself is called `flowpp`.
 
 ## What it does
 
