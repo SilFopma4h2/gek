@@ -1,14 +1,14 @@
 // gui.cpp
 //
-// GUI version of Flow++. Contains all the logic from main.cpp:
-//   - OrderBook storage (deque, limited to 500 entries)
+// GUI version of Flow++. Same logic as main.cpp:
+//   - OrderBook storage (deque, capped at 500)
 //   - evaluateSignal() (weighted mid + ratio -> BUY/SELL/NEUTRAL)
 //   - majoritySignal() over a time window (default 5 minutes)
-//   - order() (bracket order via Alpaca REST, with TP/SL based on average spread)
-//   - Websocket feed via websocket.h/cpp (Alpaca IEX quotes)
+//   - order() via Alpaca REST, TP/SL from average spread
+//   - websocket feed via websocket.h/cpp (Alpaca IEX quotes)
 //
-// WSL2-proof: runs on WSLg (X11/Wayland) via GLFW + OpenGL. If no display
-// is available, a clear error message is shown.
+// WSL2-proof: runs on WSLg (X11/Wayland) via GLFW + OpenGL, and
+// prints a clear message if no display is around.
 
 #include <algorithm>
 #include <atomic>
@@ -36,7 +36,7 @@
 #include "order.h"
 
 // ---------------------------------------------------------------------------
-// Config (matches the constants in main.cpp, now editable in the GUI)
+// Config (same constants as main.cpp, now editable in the gui)
 // ---------------------------------------------------------------------------
 struct Settings {
     char symbol[16] = "SPY";
@@ -48,7 +48,7 @@ struct Settings {
 static Settings g_settings;
 
 // ---------------------------------------------------------------------------
-// Log, locked since the feed and order threads write here too
+// Log (locked, the feed + order threads write here too)
 // ---------------------------------------------------------------------------
 struct LogEntry {
     std::string text;
@@ -109,16 +109,16 @@ static std::shared_ptr<AlpacaWebSocket> g_client;
 static std::thread g_feedThread;
 
 // ---------------------------------------------------------------------------
-// Trading state (GUI thread only)
+// Trading state (gui thread only)
 // ---------------------------------------------------------------------------
-static std::deque<OrderBook> g_bookData;      // = Apple_Book_Data (max 500)
+static std::deque<OrderBook> g_bookData;      // = symbolOrderBook (max 500)
 static std::vector<std::string> g_signalBuffer;
 static double g_spreadSum = 0.0;              // = spreadSum
 static double g_lastMid = 0.0;                // = lastMid
 static std::chrono::steady_clock::time_point g_windowStart =
     std::chrono::steady_clock::now();         // = windowStart
 
-static std::deque<double> g_bidHistory;       // for the line chart
+static std::deque<double> g_bidHistory;       // line chart data
 static std::deque<double> g_askHistory;
 static std::deque<double> g_midHistory;
 static std::deque<double> g_spreadHistory;
@@ -155,7 +155,7 @@ static QuoteMetrics computeMetrics(const OrderBook& book) {
     m.spread = book.ask - book.bid;
     m.mid = (book.bid + book.ask) / 2.0;
 
-    // Guard against divide-by-zero.
+    // guard against div by zero
     m.wmid = m.mid;
     m.ratio = 0.0;
     if ((book.bid_volume + book.ask_volume) > 0) {
@@ -164,7 +164,7 @@ static QuoteMetrics computeMetrics(const OrderBook& book) {
         m.ratio = (double)book.bid_volume / (book.bid_volume + book.ask_volume);
     }
 
-    // Weighted mid vs mid decides the signal
+    // weighted mid vs mid decides the signal
     if (m.wmid > m.mid && m.ratio > 0.60) {
         m.signal = "BUY";       // Buyer pressure dominant
     } else if (m.wmid < m.mid && m.ratio < 0.40) {
@@ -175,7 +175,7 @@ static QuoteMetrics computeMetrics(const OrderBook& book) {
     return m;
 }
 
-// Counts which signal occurred most often in the buffer (from main.cpp).
+// most common signal in the buffer (same as main.cpp)
 static std::string majoritySignal(const std::vector<std::string>& signals,
                                   int& buy, int& sell, int& neu) {
     std::map<std::string, int> counts;
@@ -234,7 +234,7 @@ static void dispatchOrderAsync(const OrderPlan& p, const std::string& signal) {
             + " (avgSpread=" + formatPrice(g_spreadSum / std::max(1, (int)g_signalBuffer.size()), 3) + ")",
             IM_COL32(120, 220, 120, 255));
 
-    // Fire the order on a worker thread so the UI stays responsive.
+    // fire the order on a worker thread so the ui stays responsive
     std::string symbol(g_settings.symbol);
     std::string side = p.side;
     double entry = p.entry, tp = p.tp, sl = p.sl;
@@ -244,7 +244,7 @@ static void dispatchOrderAsync(const OrderPlan& p, const std::string& signal) {
 }
 
 // ---------------------------------------------------------------------------
-// Decision (every intervalMinutes), mirroring the loop in main.cpp
+// Decision (every intervalMinutes), mirrors the loop in main.cpp
 // ---------------------------------------------------------------------------
 static void runDecision() {
     int buy = 0, sell = 0, neu = 0;
@@ -287,13 +287,13 @@ static void runDecision() {
     g_decisions.push_front(rec);
     if (g_decisions.size() > DECISION_CAP) g_decisions.pop_back();
 
-    // Reset the window for the next interval.
+    // fresh window for the next interval
     g_signalBuffer.clear();
     g_spreadSum = 0.0;
     g_windowStart = std::chrono::steady_clock::now();
 }
 
-// Decide as soon as the interval has elapsed, even with no fresh quotes.
+// decide as soon as the interval elapses, even with no fresh quotes
 static void runDecisionCheck() {
     auto now = std::chrono::steady_clock::now();
     int intervalSec = g_settings.intervalMinutes * 60;
@@ -304,7 +304,7 @@ static void runDecisionCheck() {
 }
 
 // ---------------------------------------------------------------------------
-// Feed on/off (runs the Alpaca websocket in its own thread)
+// Feed on/off (runs the alpaca websocket on its own thread)
 // ---------------------------------------------------------------------------
 static bool feedIsRunning() {
     std::lock_guard<std::mutex> lock(g_feedMutex);
@@ -379,7 +379,7 @@ static void stopFeed() {
 }
 
 // ---------------------------------------------------------------------------
-// Drain incoming quotes (GUI thread)
+// Drain incoming quotes (gui thread)
 // ---------------------------------------------------------------------------
 static void processQuotes() {
     std::deque<OrderBook> batch;
@@ -389,7 +389,7 @@ static void processQuotes() {
     }
 
     for (const auto& q : batch) {
-        // OrderBook storage, limited to 500 (from main.cpp).
+        // orderbook storage, capped at 500 (same as main.cpp)
         g_bookData.push_back(q);
         if (g_bookData.size() > 500) g_bookData.pop_front();
 
@@ -421,7 +421,7 @@ static void processQuotes() {
 }
 
 // ---------------------------------------------------------------------------
-// GUI panels
+// Panels
 // ---------------------------------------------------------------------------
 static ImFont* g_bigFont = nullptr;
 
@@ -831,7 +831,7 @@ int main() {
     ImGui_ImplGlfw_InitForOpenGL(window, true);
     ImGui_ImplOpenGL3_Init("#version 330");
 
-    // Route order results to the GUI log instead of stdout.
+    // route order results to the gui log instead of stdout
     setOrderLogCallback([](const std::string& msg, bool isError) {
         logLine(msg, isError ? IM_COL32(235, 90, 90, 255)
                              : IM_COL32(80, 220, 120, 255));
@@ -854,6 +854,9 @@ int main() {
         drawSignalPanel();
         drawDecisionPanel();
         drawLogPanel();
+
+        glClearColor(0.06f, 0.06f, 0.07f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
 
         ImGui::Render();
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());

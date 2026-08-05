@@ -23,7 +23,7 @@ static const std::string ALPACA_HOST = "stream.data.alpaca.markets";
 static const std::string ALPACA_PORT = "443";
 static const std::string ALPACA_PATH = "/v2/iex";
 
-// Reconnect settings
+// reconnect backoff
 static const int MAX_BACKOFF_SECONDS = 60;
 static const int INITIAL_BACKOFF_SECONDS = 1;
 
@@ -50,7 +50,7 @@ void AlpacaWebSocket::notifyStatus(const std::string& msg) const {
     if (status_cb_) status_cb_(msg);
 }
 
-// One connection attempt; returns when the connection closes.
+// single connection attempt; returns when the connection drops
 bool AlpacaWebSocket::connectAndListen() {
     if (stop_requested_.load()) return false;
 
@@ -82,7 +82,7 @@ bool AlpacaWebSocket::connectAndListen() {
         ws.handshake(ALPACA_HOST, ALPACA_PATH);
         notifyStatus("WebSocket connected, authenticating...");
 
-        // Idle timeout so a blocking read can't hang the shutdown forever.
+        // idle timeout so a blocking read can't hang shutdown forever
         websocket::stream_base::timeout timeout_opt;
         timeout_opt.handshake_timeout = std::chrono::seconds(30);
         timeout_opt.idle_timeout = std::chrono::seconds(5);
@@ -95,8 +95,8 @@ bool AlpacaWebSocket::connectAndListen() {
         };
         ws.write(net::buffer(auth_msg.dump()));
 
-        // Wait for auth before subscribing, so bad keys fail fast instead of
-        // retrying forever.
+        // wait for auth before subscribing so bad keys fail fast
+        // instead of retrying forever
         beast::flat_buffer buffer;
         bool authenticated = false;
         while (ws.is_open() && !authenticated && !stop_requested_.load()) {
@@ -188,7 +188,7 @@ bool AlpacaWebSocket::connectAndListen() {
                 }
             }
         }
-        return true; // connection closed cleanly
+        return true; // dropped cleanly
     } catch (std::exception const& e) {
         if (!stop_requested_.load()) {
             std::cerr << "WebSocket error: " << e.what() << "\n";
@@ -209,12 +209,12 @@ void AlpacaWebSocket::run() {
         if (stop_requested_.load()) break;
 
         if (cleanExit) {
-            backoff = INITIAL_BACKOFF_SECONDS; // reset backoff after a successful session
+            backoff = INITIAL_BACKOFF_SECONDS; // ok session, reset the backoff
         }
 
         std::cerr << "Connection lost, reconnecting in " << backoff << "s...\n";
         notifyStatus("Connection lost");
-        // Sleep in steps so stop() is picked up quickly.
+        // sleep in steps so stop() gets picked up quickly
         for (int waited = 0; waited < backoff && !stop_requested_.load(); ++waited) {
             std::this_thread::sleep_for(std::chrono::seconds(1));
         }

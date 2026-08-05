@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -e
 
-# Usage:  ./build.sh            -> builds and starts the console version (flow)
-#         ./build.sh --gui      -> builds and starts the GUI version (flow_gui)
+# Usage:  ./build.sh            -> build and run the console version (flow)
+#         ./build.sh --gui      -> build and run the GUI version (flow_gui)
 GUI=""
 for arg in "$@"; do
     if [ "$arg" = "--gui" ]; then

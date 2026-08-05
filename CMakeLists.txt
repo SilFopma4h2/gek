@@ -25,8 +25,8 @@ target_link_libraries(flow PRIVATE
         CURL::libcurl
 )
 
-# --- GUI (flow_gui): Dear ImGui + GLFW + OpenGL. Only built when the deps are
-# present, so the console build works on systems without a GUI. ---------------
+# --- GUI (flow_gui): Dear ImGui + GLFW + OpenGL. Only built when the deps
+# are present, so the console build still works without a GUI. ---------------
 find_package(PkgConfig QUIET)
 find_package(OpenGL QUIET)
 if(PkgConfig_FOUND)

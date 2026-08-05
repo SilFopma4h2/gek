@@ -17,10 +17,10 @@
 #include <curl/curl.h>
 
 namespace {
-// Optional UI log callback (intended for the GUI; see setOrderLogCallback).
+// optional ui log callback (used by the gui, see setOrderLogCallback)
 OrderLogCallback g_orderLogCb;
 
-// Helper to format a price on 2 decimals (required by Alpaca).
+// prices need 2 decimals for alpaca
 std::string formatPrice(double price) {
     std::ostringstream oss;
     oss << std::fixed << std::setprecision(2) << price;
@@ -37,7 +37,7 @@ void logOrder(const std::string& msg, bool isError) {
     }
 }
 
-// Shared logic to send an order body to Alpaca.
+// shared post logic for alpaca
 void postOrder(const nlohmann::json& body) {
     const char* key = std::getenv("ALPACA_API_KEY");
     const char* secret = std::getenv("ALPACA_API_SECRET");
@@ -57,7 +57,7 @@ void postOrder(const nlohmann::json& body) {
     headers = curl_slist_append(headers, ("APCA-API-SECRET-KEY: " + std::string(secret)).c_str());
     headers = curl_slist_append(headers, "Content-Type: application/json");
 
-    // Buffer to capture the response body so errors can be logged.
+    // capture the response body so we can log errors
     std::string responseBuffer;
     auto writeCallback = +[](char* ptr, size_t size, size_t nmemb, void* userdata) -> size_t {
         auto* buf = static_cast<std::string*>(userdata);
@@ -109,10 +109,9 @@ void sendBracketOrder(const std::string& symbol,
                        double entryPrice,
                        double takeProfitPrice,
                        double stopLossPrice) {
-    // Make sure TP/SL are at least one tick (0.01) away from the entry in the
-    // correct direction, so the formatted prices never coincide and Alpaca
-    // does not reject the bracket order due to equal TP/SL.
-    const double MIN_STEP = 0.01;
+// keep tp/sl at least one tick (0.01) off the entry so the formatted
+// prices never end up equal (alpaca rejects brackets with identical tp/sl)
+const double MIN_STEP = 0.01;
     if (side == "buy") {
         if (takeProfitPrice < entryPrice + MIN_STEP) takeProfitPrice = entryPrice + MIN_STEP;
         if (stopLossPrice > entryPrice - MIN_STEP) stopLossPrice = entryPrice - MIN_STEP;

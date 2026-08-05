@@ -12,15 +12,15 @@
 #include <chrono>
 #include <csignal>
 #include "order.h"
-// Config
+// config
 const std::string symbol = "SPY";
-// Decision runs on a time window (every 5 minutes), not a fixed tick count.
+// decide on a time window (5 min), not on a tick count
 const int DECISION_INTERVAL_SECONDS = 5 * 60; // 5 minutes
-// Set to true to place orders.
+// set to true to actually place orders
 const bool orderyes = false;
 
-// TP/SL as a multiplier of the average spread over the window (volatility-based).
-// R:R of 2:1 (TP further away than SL).
+// tp/sl sized off the average spread in the window
+// 2:1 rr, tp further away than sl
 const double TP_SPREAD_MULTIPLIER = 3.0;
 const double SL_SPREAD_MULTIPLIER = 1.5;
 
@@ -31,55 +31,54 @@ struct OrderBook {
     double ask_volume;
 };
 
-// Incoming quote data
-std::deque<OrderBook> Apple_Book_Data;
+// incoming quotes
+std::deque<OrderBook> symbolOrderBook;
 
 static std::mutex bookMutex;
 static std::condition_variable bookCv;
 static bool newDataAvailable = false;
 
-// Buffer for the majority decision over a time window (5 min).
+// one signal per quote, used for the majority vote
 static std::vector<std::string> signalBuffer;
 static double spreadSum = 0.0;
 static double lastMid = 0.0;
 static std::chrono::steady_clock::time_point windowStart =
     std::chrono::steady_clock::now();
 
-// Clean shutdown via SIGINT/SIGTERM.
+// so we can stop cleanly on ctrl-c etc
 static volatile std::sig_atomic_t g_stop = 0;
 static void handleSignal(int) {
     g_stop = 1;
 }
 
-// Function that determines the signal based on a single quote
+// signal for a single quote
 std::string evaluateSignal(const OrderBook& book) {
-    // 1. Basic calculations
+    // basic stuff
     double spread = book.ask - book.bid;
     double mid = (book.bid + book.ask) / 2.0;
 
-    // Safety check to avoid division by zero
     double wmid = mid;
 
-    // Weighted mid formula.
+    // weighted mid
     if ((book.bid_volume + book.ask_volume) > 0) {
         wmid = (book.bid_volume * book.ask + book.ask_volume * book.bid) / (book.bid_volume + book.ask_volume);
     }
 
-    // Bid share of the total volume; guard against zero volumes.
+    // bid share of total volume
     double Ratio = 0.0;
     if ((book.bid_volume + book.ask_volume) > 0) {
         Ratio = (double)book.bid_volume / (book.bid_volume + book.ask_volume);
     }
 
-    // Print the base data
+    // print the raw data
     std::cout << "Bid: " << book.bid << " | Ask: " << book.ask << " | Spread: " << spread << "\n";
     std::cout << "Mid: " << mid << " | Weighted Mid: " << wmid << "\n";
 
-    // Track for the majority decision
+    // keep running totals for the window
     spreadSum += spread;
     lastMid = mid;
 
-    // 2. Signal logic (based on Weighted Mid vs Mid)
+    // signal logic
     std::cout << "SIGNAL: ";
     if (wmid > mid && Ratio > 0.60) {
         std::cout << " BUY  (Buyer pressure dominant)\n";
@@ -94,7 +93,7 @@ std::string evaluateSignal(const OrderBook& book) {
     }
 }
 
-// Counts which signal occurred most often in the buffer.
+// most common signal in the buffer
 std::string majoritySignal(const std::vector<std::string>& signals) {
     std::map<std::string, int> counts;
     for (const auto& s : signals) counts[s]++;
@@ -117,16 +116,15 @@ std::string majoritySignal(const std::vector<std::string>& signals) {
     return best;
 }
 
-// Places a bracket order (TP/SL) from the majority signal, using the average
-// spread over the window as a volatility measure. Entry is a limit order at
-// the current mid, so TP/SL anchor to a known entry price.
+// bracket order (tp/sl) from the majority signal; entry is a limit at
+// the current mid so tp/sl anchor to a known price
 void order(const std::string& signal, int tickCount) {
     if (!orderyes) {
         std::cout << "orders are disabled, no orders placed\n";
         return;
     }
 
-    // Tick count varies per window, so divide the spread sum by the real count.
+    // window tick count varies, so divide by the real count
     double avgSpread = tickCount > 0 ? spreadSum / tickCount : 0.0;
     double entry = lastMid;
 
@@ -167,9 +165,9 @@ int main() {
                                 double bid_volume, double ask_volume) {
         {
             std::lock_guard<std::mutex> lock(bookMutex);
-            Apple_Book_Data.push_back(OrderBook{bid, ask, bid_volume, ask_volume});
-            if (Apple_Book_Data.size() > 500) {
-                Apple_Book_Data.pop_front();
+            symbolOrderBook.push_back(OrderBook{bid, ask, bid_volume, ask_volume});
+            if (symbolOrderBook.size() > 500) {
+                symbolOrderBook.pop_front();
             }
             newDataAvailable = true;
         }
@@ -191,8 +189,8 @@ int main() {
         if (newDataAvailable) {
             newDataAvailable = false;
 
-            if (!Apple_Book_Data.empty()) {
-                OrderBook latestBook = Apple_Book_Data.back();
+            if (!symbolOrderBook.empty()) {
+                OrderBook latestBook = symbolOrderBook.back();
                 lock.unlock();
 
                 std::cout << "\n-- New quote received --\n";
@@ -203,7 +201,7 @@ int main() {
             }
         }
 
-        // Also runs on timeout/spurious wake so a decision is never skipped.
+        // also fires on timeout/spurious wake so we never skip a decision
         auto now = std::chrono::steady_clock::now();
         if (now - windowStart >= std::chrono::seconds(DECISION_INTERVAL_SECONDS)) {
             if (!signalBuffer.empty()) {
@@ -211,7 +209,7 @@ int main() {
                 order(decision, static_cast<int>(signalBuffer.size()));
             }
 
-            // Reset window for the next 5 minutes
+            // start a fresh window
             signalBuffer.clear();
             spreadSum = 0.0;
             windowStart = now;
