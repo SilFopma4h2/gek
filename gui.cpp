@@ -118,9 +118,11 @@ static double g_lastMid = 0.0;                // = lastMid
 static std::chrono::steady_clock::time_point g_windowStart =
     std::chrono::steady_clock::now();         // = windowStart
 
-static std::deque<double> g_midHistory;       // voor de sparkline
+static std::deque<double> g_bidHistory;       // voor de lijngrafiek
+static std::deque<double> g_askHistory;
+static std::deque<double> g_midHistory;
 static std::deque<double> g_spreadHistory;
-static constexpr size_t CHART_CAP = 240;
+static constexpr size_t CHART_CAP = 600;
 
 struct DecisionRecord {
     std::string timeStr;
@@ -400,8 +402,12 @@ static void processQuotes() {
 
         g_midHistory.push_back(m.mid);
         g_spreadHistory.push_back(m.spread);
+        g_bidHistory.push_back(q.bid);
+        g_askHistory.push_back(q.ask);
         if (g_midHistory.size() > CHART_CAP) g_midHistory.pop_front();
         if (g_spreadHistory.size() > CHART_CAP) g_spreadHistory.pop_front();
+        if (g_bidHistory.size() > CHART_CAP) g_bidHistory.pop_front();
+        if (g_askHistory.size() > CHART_CAP) g_askHistory.pop_front();
 
         if (g_logEveryQuote) {
             logLine(nowStr() + " | Bid=" + formatPrice(q.bid)
@@ -488,6 +494,102 @@ static void drawConnectionPanel() {
         g_spreadSum = 0.0;
         g_windowStart = std::chrono::steady_clock::now();
         logLine("Venster handmatig gereset.", IM_COL32(180, 180, 180, 255));
+    }
+
+    ImGui::End();
+}
+
+static void drawChartPanel() {
+    ImGui::SetNextWindowSize(ImVec2(860, 420), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowPos(ImVec2(400, 360), ImGuiCond_FirstUseEver);
+    ImGui::Begin("Ticker Grafiek");
+
+    if (g_midHistory.empty()) {
+        ImGui::TextWrapped("Nog geen quotes ontvangen. Start de feed om de beweging van de ticker te zien.");
+        ImGui::End();
+        return;
+    }
+
+    ImGui::TextUnformatted("Legenda:");
+    ImGui::SameLine();
+    ImGui::ColorButton("##bid_legend", ImVec4(0.30f, 0.55f, 0.95f, 1.0f), ImGuiColorEditFlags_NoTooltip, ImVec2(12, 12));
+    ImGui::SameLine();
+    ImGui::TextUnformatted("Bid");
+    ImGui::SameLine();
+    ImGui::ColorButton("##ask_legend", ImVec4(0.95f, 0.40f, 0.35f, 1.0f), ImGuiColorEditFlags_NoTooltip, ImVec2(12, 12));
+    ImGui::SameLine();
+    ImGui::TextUnformatted("Ask");
+    ImGui::SameLine();
+    ImGui::ColorButton("##mid_legend", ImVec4(0.95f, 0.85f, 0.25f, 1.0f), ImGuiColorEditFlags_NoTooltip, ImVec2(12, 12));
+    ImGui::SameLine();
+    ImGui::TextUnformatted("Mid");
+    ImGui::SameLine();
+    ImGui::TextDisabled("(%zu punten)", g_midHistory.size());
+
+    ImVec2 avail = ImGui::GetContentRegionAvail();
+    ImVec2 pMin = ImGui::GetCursorScreenPos();
+    ImVec2 pMax(pMin.x + avail.x, pMin.y + avail.y);
+    if (avail.y > 16.0f) {
+        ImGui::InvisibleButton("##chart", avail);
+
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        dl->AddRectFilled(pMin, pMax, IM_COL32(20, 20, 24, 255));
+        dl->AddRect(pMin, pMax, IM_COL32(70, 70, 80, 255));
+
+        float lo = FLT_MAX, hi = -FLT_MAX;
+        for (size_t i = 0; i < g_bidHistory.size(); ++i) {
+            lo = std::min(lo, (float)g_bidHistory[i]);
+            lo = std::min(lo, (float)g_askHistory[i]);
+            lo = std::min(lo, (float)g_midHistory[i]);
+            hi = std::max(hi, (float)g_bidHistory[i]);
+            hi = std::max(hi, (float)g_askHistory[i]);
+            hi = std::max(hi, (float)g_midHistory[i]);
+        }
+        float pad = (hi - lo) * 0.08f;
+        if (pad < 1e-6f) { pad = 0.5f; }
+        lo -= pad;
+        hi += pad;
+        const float range = (hi - lo) > 1e-9f ? (hi - lo) : 1.0f;
+
+        // Grid-lijnen + y-as labels
+        const int gridLines = 4;
+        char buf[32];
+        for (int i = 0; i <= gridLines; ++i) {
+            float t = (float)i / (float)gridLines;
+            float y = pMax.y - t * (pMax.y - pMin.y);
+            dl->AddLine(ImVec2(pMin.x, y), ImVec2(pMax.x, y), IM_COL32(45, 45, 52, 255));
+            float val = lo + t * range;
+            snprintf(buf, sizeof(buf), "%.2f", val);
+            dl->AddText(ImVec2(pMin.x + 4, y - 8), IM_COL32(160, 160, 170, 255), buf);
+        }
+
+        auto plotLine = [&](const std::deque<double>& data, ImU32 color) {
+            if (data.empty()) return;
+            int n = (int)data.size();
+            std::vector<ImVec2> pts;
+            pts.reserve(n);
+            float x = pMax.x;
+            float xStep = (pMax.x - pMin.x) / (float)(CHART_CAP - 1);
+            for (int i = n - 1; i >= 0; --i) {
+                float y = pMax.y - (float)((data[i] - lo) / range) * (pMax.y - pMin.y);
+                pts.push_back(ImVec2(x, y));
+                x -= xStep;
+            }
+            dl->AddPolyline(pts.data(), (int)pts.size(), color, 0, 2.0f);
+        };
+
+        plotLine(g_bidHistory, IM_COL32(77, 140, 242, 255));
+        plotLine(g_askHistory, IM_COL32(242, 102, 89, 255));
+        plotLine(g_midHistory, IM_COL32(242, 217, 64, 255));
+
+        // Hover: toon waarden op de muispositie
+        if (ImGui::IsItemHovered()) {
+            ImVec2 mouse = ImGui::GetIO().MousePos;
+            ImGui::SetTooltip("Bid: %s\nAsk: %s\nMid: %s",
+                              formatPrice(g_bidHistory.back()).c_str(),
+                              formatPrice(g_askHistory.back()).c_str(),
+                              formatPrice(g_midHistory.back()).c_str());
+        }
     }
 
     ImGui::End();
@@ -749,6 +851,7 @@ int main() {
         drawMenuBar();
         drawConnectionPanel();
         drawMarketPanel();
+        drawChartPanel();
         drawSignalPanel();
         drawDecisionPanel();
         drawLogPanel();
