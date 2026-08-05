@@ -7,13 +7,15 @@
 //   - order() via Alpaca REST, TP/SL from average spread
 //   - websocket feed via websocket.h/cpp (Alpaca IEX quotes)
 //
-// WSL2-proof: runs on WSLg (X11/Wayland) via GLFW + OpenGL, and
-// prints a clear message if no display is around.
+// Runs on WSLg (X11/Wayland) via GLFW + OpenGL; prints a clear
+// message if there's no display around.
 
 #include <algorithm>
 #include <atomic>
+#include <cfloat>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <ctime>
 #include <deque>
@@ -36,7 +38,94 @@
 #include "order.h"
 
 // ---------------------------------------------------------------------------
-// Config (same constants as main.cpp, now editable in the gui)
+// palette + theme
+// ---------------------------------------------------------------------------
+namespace col {
+const ImU32 bg       = IM_COL32(20, 22, 26, 255);
+const ImU32 panel    = IM_COL32(24, 27, 32, 255);
+const ImU32 panelLt  = IM_COL32(29, 33, 39, 255);
+const ImU32 border   = IM_COL32(48, 54, 63, 255);
+const ImU32 text     = IM_COL32(230, 237, 243, 255);
+const ImU32 textDim  = IM_COL32(139, 148, 158, 255);
+const ImU32 accent   = IM_COL32(88, 166, 255, 255);
+const ImU32 blue     = IM_COL32(88, 166, 255, 255);
+const ImU32 green    = IM_COL32(63, 185, 80, 255);
+const ImU32 red      = IM_COL32(248, 81, 73, 255);
+const ImU32 yellow   = IM_COL32(210, 153, 34, 255);
+}
+
+static void applyTheme() {
+    ImGui::StyleColorsDark();
+    ImGuiStyle& s = ImGui::GetStyle();
+    s.WindowPadding    = ImVec2(10, 10);
+    s.FramePadding     = ImVec2(6, 4);
+    s.ItemSpacing      = ImVec2(8, 6);
+    s.ItemInnerSpacing = ImVec2(6, 4);
+    s.WindowRounding   = 6.0f;
+    s.ChildRounding    = 4.0f;
+    s.FrameRounding    = 4.0f;
+    s.PopupRounding    = 4.0f;
+    s.ScrollbarRounding = 8.0f;
+    s.GrabRounding     = 4.0f;
+    s.TabRounding      = 4.0f;
+    s.WindowBorderSize = 1.0f;
+    s.ChildBorderSize  = 1.0f;
+    s.PopupBorderSize  = 1.0f;
+    s.FrameBorderSize  = 0.0f;
+    s.ScrollbarSize    = 10.0f;
+    s.GrabMinSize      = 10.0f;
+
+    ImVec4* c = s.Colors;
+    c[ImGuiCol_Text]                 = ImVec4(0.902f, 0.929f, 0.953f, 1.00f);
+    c[ImGuiCol_TextDisabled]         = ImVec4(0.545f, 0.580f, 0.620f, 1.00f);
+    c[ImGuiCol_WindowBg]             = ImVec4(0.094f, 0.106f, 0.125f, 1.00f);
+    c[ImGuiCol_ChildBg]              = ImVec4(0.078f, 0.086f, 0.102f, 1.00f);
+    c[ImGuiCol_PopupBg]              = ImVec4(0.094f, 0.106f, 0.125f, 0.98f);
+    c[ImGuiCol_Border]               = ImVec4(0.188f, 0.212f, 0.247f, 1.00f);
+    c[ImGuiCol_BorderShadow]         = ImVec4(0.00f, 0.00f, 0.00f, 0.00f);
+    c[ImGuiCol_FrameBg]              = ImVec4(0.114f, 0.129f, 0.153f, 1.00f);
+    c[ImGuiCol_FrameBgHovered]       = ImVec4(0.153f, 0.173f, 0.204f, 1.00f);
+    c[ImGuiCol_FrameBgActive]        = ImVec4(0.153f, 0.173f, 0.204f, 1.00f);
+    c[ImGuiCol_TitleBg]              = ImVec4(0.094f, 0.106f, 0.125f, 1.00f);
+    c[ImGuiCol_TitleBgActive]        = ImVec4(0.114f, 0.129f, 0.153f, 1.00f);
+    c[ImGuiCol_TitleBgCollapsed]     = ImVec4(0.094f, 0.106f, 0.125f, 0.60f);
+    c[ImGuiCol_MenuBarBg]            = ImVec4(0.094f, 0.106f, 0.125f, 1.00f);
+    c[ImGuiCol_ScrollbarBg]          = ImVec4(0.078f, 0.086f, 0.102f, 1.00f);
+    c[ImGuiCol_ScrollbarGrab]        = ImVec4(0.188f, 0.212f, 0.247f, 1.00f);
+    c[ImGuiCol_ScrollbarGrabHovered] = ImVec4(0.298f, 0.333f, 0.384f, 1.00f);
+    c[ImGuiCol_ScrollbarGrabActive]  = ImVec4(0.345f, 0.384f, 0.443f, 1.00f);
+    c[ImGuiCol_CheckMark]            = ImVec4(0.345f, 0.651f, 1.000f, 1.00f);
+    c[ImGuiCol_SliderGrab]           = ImVec4(0.345f, 0.651f, 1.000f, 1.00f);
+    c[ImGuiCol_SliderGrabActive]     = ImVec4(0.510f, 0.720f, 1.000f, 1.00f);
+    c[ImGuiCol_Button]               = ImVec4(0.114f, 0.129f, 0.153f, 1.00f);
+    c[ImGuiCol_ButtonHovered]        = ImVec4(0.188f, 0.212f, 0.247f, 1.00f);
+    c[ImGuiCol_ButtonActive]         = ImVec4(0.247f, 0.447f, 0.702f, 1.00f);
+    c[ImGuiCol_Header]               = ImVec4(0.188f, 0.212f, 0.247f, 1.00f);
+    c[ImGuiCol_HeaderHovered]        = ImVec4(0.247f, 0.447f, 0.702f, 0.40f);
+    c[ImGuiCol_HeaderActive]         = ImVec4(0.247f, 0.447f, 0.702f, 0.60f);
+    c[ImGuiCol_Separator]            = ImVec4(0.188f, 0.212f, 0.247f, 1.00f);
+    c[ImGuiCol_SeparatorHovered]     = ImVec4(0.345f, 0.651f, 1.000f, 0.60f);
+    c[ImGuiCol_SeparatorActive]      = ImVec4(0.345f, 0.651f, 1.000f, 0.80f);
+    c[ImGuiCol_ResizeGrip]           = ImVec4(0.345f, 0.651f, 1.000f, 0.20f);
+    c[ImGuiCol_ResizeGripHovered]    = ImVec4(0.345f, 0.651f, 1.000f, 0.50f);
+    c[ImGuiCol_ResizeGripActive]     = ImVec4(0.345f, 0.651f, 1.000f, 0.70f);
+    c[ImGuiCol_Tab]                  = ImVec4(0.114f, 0.129f, 0.153f, 1.00f);
+    c[ImGuiCol_TabHovered]           = ImVec4(0.247f, 0.447f, 0.702f, 0.50f);
+    c[ImGuiCol_TabActive]            = ImVec4(0.188f, 0.212f, 0.247f, 1.00f);
+    c[ImGuiCol_TabUnfocused]         = ImVec4(0.094f, 0.106f, 0.125f, 1.00f);
+    c[ImGuiCol_TabUnfocusedActive]   = ImVec4(0.114f, 0.129f, 0.153f, 1.00f);
+    c[ImGuiCol_TableHeaderBg]        = ImVec4(0.114f, 0.129f, 0.153f, 1.00f);
+    c[ImGuiCol_TableBorderStrong]    = ImVec4(0.188f, 0.212f, 0.247f, 1.00f);
+    c[ImGuiCol_TableBorderLight]     = ImVec4(0.153f, 0.173f, 0.204f, 1.00f);
+    c[ImGuiCol_PlotLines]            = ImVec4(0.345f, 0.651f, 1.000f, 1.00f);
+    c[ImGuiCol_PlotLinesHovered]     = ImVec4(0.510f, 0.720f, 1.000f, 1.00f);
+    c[ImGuiCol_PlotHistogram]        = ImVec4(0.345f, 0.651f, 1.000f, 1.00f);
+    c[ImGuiCol_PlotHistogramHovered] = ImVec4(0.510f, 0.720f, 1.000f, 1.00f);
+    c[ImGuiCol_TextSelectedBg]       = ImVec4(0.247f, 0.447f, 0.702f, 0.40f);
+}
+
+// ---------------------------------------------------------------------------
+// config (same constants as main.cpp, editable here)
 // ---------------------------------------------------------------------------
 struct Settings {
     char symbol[16] = "SPY";
@@ -48,7 +137,7 @@ struct Settings {
 static Settings g_settings;
 
 // ---------------------------------------------------------------------------
-// Log (locked, the feed + order threads write here too)
+// log (locked; feed + order threads write here)
 // ---------------------------------------------------------------------------
 struct LogEntry {
     std::string text;
@@ -59,7 +148,7 @@ static std::mutex g_logMutex;
 static std::deque<LogEntry> g_log;
 static constexpr size_t LOG_CAP = 500;
 
-static void logLine(const std::string& text, ImU32 color = IM_COL32(200, 200, 200, 255)) {
+static void logLine(const std::string& text, ImU32 color = col::textDim) {
     std::lock_guard<std::mutex> lock(g_logMutex);
     g_log.push_back({text, color});
     if (g_log.size() > LOG_CAP) g_log.pop_front();
@@ -82,13 +171,15 @@ static std::string formatPrice(double p, int prec = 2) {
 }
 
 static ImU32 signalColor(const std::string& s) {
-    if (s == "BUY")    return IM_COL32(80, 220, 120, 255);
-    if (s == "SELL")   return IM_COL32(235, 90, 90, 255);
-    return IM_COL32(230, 190, 80, 255);
+    if (s == "BUY")  return col::green;
+    if (s == "SELL") return col::red;
+    return col::yellow;
 }
 
+static ImVec4 colF(ImU32 c) { return ImGui::ColorConvertU32ToFloat4(c); }
+
 // ---------------------------------------------------------------------------
-// Shared data between the feed thread and the GUI thread
+// shared data: feed thread <-> gui thread
 // ---------------------------------------------------------------------------
 struct OrderBook {
     double bid;
@@ -109,7 +200,7 @@ static std::shared_ptr<AlpacaWebSocket> g_client;
 static std::thread g_feedThread;
 
 // ---------------------------------------------------------------------------
-// Trading state (gui thread only)
+// trading state (gui thread only)
 // ---------------------------------------------------------------------------
 static std::deque<OrderBook> g_bookData;      // = symbolOrderBook (max 500)
 static std::vector<std::string> g_signalBuffer;
@@ -140,7 +231,7 @@ static bool g_logEveryQuote = true;
 static bool g_autoScroll = true;
 
 // ---------------------------------------------------------------------------
-// Signal logic (ported from main.cpp)
+// signal logic (ported from main.cpp)
 // ---------------------------------------------------------------------------
 struct QuoteMetrics {
     double spread;
@@ -166,11 +257,11 @@ static QuoteMetrics computeMetrics(const OrderBook& book) {
 
     // weighted mid vs mid decides the signal
     if (m.wmid > m.mid && m.ratio > 0.60) {
-        m.signal = "BUY";       // Buyer pressure dominant
+        m.signal = "BUY";       // buyer pressure
     } else if (m.wmid < m.mid && m.ratio < 0.40) {
-        m.signal = "SELL";      // Seller pressure dominant
+        m.signal = "SELL";      // seller pressure
     } else {
-        m.signal = "NEUTRAL";   // Volumes balanced
+        m.signal = "NEUTRAL";   // volumes balanced
     }
     return m;
 }
@@ -197,7 +288,7 @@ static std::string majoritySignal(const std::vector<std::string>& signals,
 }
 
 // ---------------------------------------------------------------------------
-// Order planning and placement (ported from main.cpp: order())
+// order planning + placement (ported from main.cpp)
 // ---------------------------------------------------------------------------
 struct OrderPlan {
     std::string side;
@@ -232,7 +323,7 @@ static void dispatchOrderAsync(const OrderPlan& p, const std::string& signal) {
     logLine("-> " + signal + " limit+bracket: entry=" + formatPrice(p.entry)
             + " qty=1, TP=" + formatPrice(p.tp) + " SL=" + formatPrice(p.sl)
             + " (avgSpread=" + formatPrice(g_spreadSum / std::max(1, (int)g_signalBuffer.size()), 3) + ")",
-            IM_COL32(120, 220, 120, 255));
+            col::green);
 
     // fire the order on a worker thread so the ui stays responsive
     std::string symbol(g_settings.symbol);
@@ -244,7 +335,7 @@ static void dispatchOrderAsync(const OrderPlan& p, const std::string& signal) {
 }
 
 // ---------------------------------------------------------------------------
-// Decision (every intervalMinutes), mirrors the loop in main.cpp
+// decision (every intervalMinutes), same loop as main.cpp
 // ---------------------------------------------------------------------------
 static void runDecision() {
     int buy = 0, sell = 0, neu = 0;
@@ -277,11 +368,10 @@ static void runDecision() {
         if (plan.enabled) {
             dispatchOrderAsync(plan, decision);
         } else {
-            logLine("Orders are disabled, no order placed.",
-                    IM_COL32(180, 180, 180, 255));
+            logLine("Orders are disabled, no order placed.", col::textDim);
         }
     } else {
-        logLine("No order. Majority was NEUTRAL.", IM_COL32(180, 180, 180, 255));
+        logLine("No order. Majority was NEUTRAL.", col::textDim);
     }
 
     g_decisions.push_front(rec);
@@ -304,7 +394,7 @@ static void runDecisionCheck() {
 }
 
 // ---------------------------------------------------------------------------
-// Feed on/off (runs the alpaca websocket on its own thread)
+// feed on/off (websocket on its own thread)
 // ---------------------------------------------------------------------------
 static bool feedIsRunning() {
     std::lock_guard<std::mutex> lock(g_feedMutex);
@@ -314,14 +404,14 @@ static bool feedIsRunning() {
 static void startFeed() {
     std::lock_guard<std::mutex> lock(g_feedMutex);
     if (g_feedThread.joinable()) {
-        logLine("Feed is already running.", IM_COL32(230, 190, 80, 255));
+        logLine("Feed is already running.", col::yellow);
         return;
     }
 
     const char* key = std::getenv("ALPACA_API_KEY");
     const char* secret = std::getenv("ALPACA_API_SECRET");
     if (!key || !secret) {
-        logLine("ALPACA_API_KEY / ALPACA_API_SECRET not set.", IM_COL32(235, 90, 90, 255));
+        logLine("ALPACA_API_KEY / ALPACA_API_SECRET not set.", col::red);
         {
             std::lock_guard<std::mutex> s(g_statusMutex);
             g_statusText = "No credentials";
@@ -341,7 +431,7 @@ static void startFeed() {
     });
 
     g_client->setStatusCallback([](const std::string& msg) {
-        logLine("[feed] " + msg, IM_COL32(150, 150, 255, 255));
+        logLine("[feed] " + msg, col::accent);
         std::lock_guard<std::mutex> s(g_statusMutex);
         g_statusText = msg;
         if (msg.find("Authenticated") != std::string::npos) {
@@ -357,13 +447,13 @@ static void startFeed() {
         c->run();
     }, g_client);
 
-    logLine("Feed started for symbol " + sym, IM_COL32(80, 220, 120, 255));
+    logLine("Feed started for symbol " + sym, col::green);
 }
 
 static void stopFeed() {
     std::lock_guard<std::mutex> lock(g_feedMutex);
     if (!g_feedThread.joinable()) {
-        logLine("Feed is not running.", IM_COL32(230, 190, 80, 255));
+        logLine("Feed is not running.", col::yellow);
         return;
     }
     if (g_client) g_client->stop();
@@ -375,11 +465,11 @@ static void stopFeed() {
         g_statusText = "Stopped";
         g_connected = false;
     }
-    logLine("Feed stopped.", IM_COL32(180, 180, 180, 255));
+    logLine("Feed stopped.", col::textDim);
 }
 
 // ---------------------------------------------------------------------------
-// Drain incoming quotes (gui thread)
+// drain incoming quotes (gui thread)
 // ---------------------------------------------------------------------------
 static void processQuotes() {
     std::deque<OrderBook> batch;
@@ -421,14 +511,87 @@ static void processQuotes() {
 }
 
 // ---------------------------------------------------------------------------
-// Panels
+// layout: fixed grid, windows still draggable/resizable
 // ---------------------------------------------------------------------------
+struct Layout {
+    ImVec2 connPos, connSz;
+    ImVec2 marketPos, marketSz;
+    ImVec2 signalsPos, signalsSz;
+    ImVec2 chartPos, chartSz;
+    ImVec2 logPos, logSz;
+    ImVec2 decPos, decSz;
+};
+
+static Layout layout() {
+    const ImVec2 d = ImGui::GetIO().DisplaySize;
+    const float m = 8.0f, gap = 8.0f, top = 28.0f;
+    const float w = d.x - 2.0f * m;
+    const float h = std::max(300.0f, d.y - top - m);
+    const float leftW = 360.0f;
+    const float rightW = 380.0f;
+    const float midW = std::max(240.0f, w - leftW - rightW - 2.0f * gap);
+    const float bottomH = 200.0f;
+    const float upperH = std::max(140.0f, h - bottomH - gap);
+    const float halfH = (upperH - gap) * 0.5f;
+
+    const float midX = m + leftW + gap;
+    const float rightX = midX + midW + gap;
+
+    Layout L;
+    L.connPos = ImVec2(m, top);
+    L.connSz  = ImVec2(leftW, upperH);
+
+    L.marketPos = ImVec2(midX, top);
+    L.marketSz  = ImVec2(midW, halfH);
+
+    L.signalsPos = ImVec2(rightX, top);
+    L.signalsSz  = ImVec2(rightW, halfH);
+
+    L.chartPos = ImVec2(midX, top + halfH + gap);
+    L.chartSz  = ImVec2(midW, halfH);
+
+    L.logPos = ImVec2(rightX, top + halfH + gap);
+    L.logSz  = ImVec2(rightW, halfH);
+
+    L.decPos = ImVec2(m, top + upperH + gap);
+    L.decSz  = ImVec2(w, bottomH);
+    return L;
+}
+
+static ImVec4 connectedColor(bool running) {
+    if (running) return g_connected ? ImVec4(0.247f, 0.725f, 0.314f, 1.0f)
+                                    : ImVec4(0.824f, 0.600f, 0.133f, 1.0f);
+    return ImVec4(0.545f, 0.580f, 0.620f, 1.0f);
+}
+
+// force the grid once on startup so old flow_gui.ini
+// positions don't overlap the windows
+static bool g_forceLayout = true;
+
+static void applyPanelPlacement(const ImVec2& pos, const ImVec2& sz) {
+    ImGuiCond cond = g_forceLayout ? ImGuiCond_Always : ImGuiCond_FirstUseEver;
+    ImGui::SetNextWindowPos(pos, cond);
+    ImGui::SetNextWindowSize(sz, cond);
+}
+
+static void centerHint(const char* text) {
+    ImVec2 avail = ImGui::GetContentRegionAvail();
+    ImVec2 textSize = ImGui::CalcTextSize(text);
+    ImGui::SetCursorPos(ImVec2((avail.x - textSize.x) * 0.5f,
+                               (avail.y - textSize.y) * 0.5f));
+    ImGui::TextDisabled("%s", text);
+}
+
 static ImFont* g_bigFont = nullptr;
 
+// ---------------------------------------------------------------------------
+// menu bar
+// ---------------------------------------------------------------------------
 static void drawMenuBar() {
     if (ImGui::BeginMainMenuBar()) {
-        ImGui::Text("Flow++");
+        ImGui::TextColored(ImVec4(0.345f, 0.651f, 1.0f, 1.0f), "Flow++");
         ImGui::Separator();
+
         std::string status;
         bool connected;
         {
@@ -436,171 +599,216 @@ static void drawMenuBar() {
             status = g_statusText;
             connected = g_connected;
         }
-        ImGui::TextColored(connected ? ImVec4(0.3f, 0.85f, 0.45f, 1.0f)
-                                     : ImVec4(0.75f, 0.75f, 0.75f, 1.0f),
-                           "%s", connected ? "Connected" : "Offline");
+
+        ImGui::Text("Symbol: %s", g_settings.symbol);
         ImGui::Separator();
-        ImGui::TextUnformatted(status.c_str());
+
+        ImU32 dotCol = connected ? col::green : col::red;
+        ImVec2 pos = ImGui::GetCursorScreenPos();
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        dl->AddCircleFilled(ImVec2(pos.x + 4, pos.y + 8), 4.0f, dotCol);
+        ImGui::SetCursorScreenPos(ImVec2(pos.x + 12, pos.y));
+        ImGui::TextUnformatted(connected ? "Connected" : "Offline");
+        ImGui::SameLine();
+        ImGui::TextDisabled("(%s)", status.c_str());
+        ImGui::SameLine();
+        ImGui::Separator();
+        ImGui::Text("Signal: ");
+        ImGui::SameLine();
+        ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(signalColor(g_lastSignal)),
+                           "%s", g_lastSignal.c_str());
+
+        if (ImGui::BeginMenu("View")) {
+            if (ImGui::MenuItem("Reset layout")) {
+                const char* fname = ImGui::GetIO().IniFilename;
+                if (fname) std::remove(fname);
+                ImGui::LoadIniSettingsFromMemory("", 0);
+            }
+            ImGui::EndMenu();
+        }
         ImGui::EndMainMenuBar();
     }
 }
 
+// ---------------------------------------------------------------------------
+// connection & settings
+// ---------------------------------------------------------------------------
 static void drawConnectionPanel() {
-    ImGui::SetNextWindowSize(ImVec2(380, 360), ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowPos(ImVec2(10, 30), ImGuiCond_FirstUseEver);
+    Layout L = layout();
+    applyPanelPlacement(L.connPos, L.connSz);
     ImGui::Begin("Connection & Settings");
 
-    ImGui::TextUnformatted("Alpaca credentials:");
+    ImGui::SeparatorText("Credentials");
     const char* key = std::getenv("ALPACA_API_KEY");
     const char* secret = std::getenv("ALPACA_API_SECRET");
-    ImGui::BulletText("API key:    %s", (key && *key) ? "set" : "MISSING");
-    ImGui::BulletText("API secret: %s", (secret && *secret) ? "set" : "MISSING");
-    ImGui::Separator();
+    bool keyOk = key && *key;
+    bool secOk = secret && *secret;
+    ImGui::TextColored(keyOk ? ImVec4(0.247f, 0.725f, 0.314f, 1.0f)
+                             : ImVec4(0.973f, 0.318f, 0.286f, 1.0f),
+                       "[%s] API key", keyOk ? "ok" : "missing");
+    ImGui::TextColored(secOk ? ImVec4(0.247f, 0.725f, 0.314f, 1.0f)
+                             : ImVec4(0.973f, 0.318f, 0.286f, 1.0f),
+                       "[%s] API secret", secOk ? "ok" : "missing");
 
     bool running = feedIsRunning();
-    ImGui::InputText("Symbol", g_settings.symbol, sizeof(g_settings.symbol));
+    ImGui::InputText("Symbol", g_settings.symbol, sizeof(g_settings.symbol),
+                     ImGuiInputTextFlags_CharsUppercase);
 
     ImGui::BeginDisabled(running);
-    if (ImGui::Button("Connect", ImVec2(120, 0))) startFeed();
+    bool connect = ImGui::Button("Connect", ImVec2(-1, 0));
     ImGui::EndDisabled();
-    ImGui::SameLine();
-    ImGui::BeginDisabled(!running);
-    if (ImGui::Button("Disconnect", ImVec2(120, 0))) stopFeed();
-    ImGui::EndDisabled();
-    ImGui::SameLine();
-    ImGui::TextColored(running ? ImVec4(0.3f, 0.85f, 0.45f, 1.0f)
-                               : ImVec4(0.75f, 0.75f, 0.75f, 1.0f),
-                       "%s", running ? (g_connected ? "connected" : "connecting...") : "off");
+    if (connect) startFeed();
 
-    std::string status;
+    ImGui::BeginDisabled(!running);
+    bool disconnect = ImGui::Button("Disconnect", ImVec2(-1, 0));
+    ImGui::EndDisabled();
+    if (disconnect) stopFeed();
+
     {
         std::lock_guard<std::mutex> s(g_statusMutex);
-        status = g_statusText;
+        ImGui::TextColored(connectedColor(running), "%s",
+                           running ? (g_connected ? "connected" : "connecting...") : "off");
     }
-    ImGui::TextUnformatted("Status:");
-    ImGui::TextWrapped("%s", status.c_str());
+    ImGui::SeparatorText("Status");
+    {
+        std::lock_guard<std::mutex> s(g_statusMutex);
+        ImGui::TextWrapped("%s", g_statusText.c_str());
+    }
 
-    ImGui::Separator();
-    ImGui::TextUnformatted("Settings (take effect from the next decision)");
-    ImGui::Checkbox("Place orders (orderyes)", &g_settings.orderEnabled);
-    ImGui::DragFloat("TP multiplier", &g_settings.tpMult, 0.1f, 0.5f, 10.0f);
-    ImGui::DragFloat("SL multiplier", &g_settings.slMult, 0.1f, 0.5f, 10.0f);
+    ImGui::SeparatorText("Trading");
+    ImGui::TextDisabled("Settings apply from the next decision");
+    ImGui::Checkbox("Place orders", &g_settings.orderEnabled);
+    ImGui::DragFloat("TP multiplier", &g_settings.tpMult, 0.1f, 0.5f, 10.0f, "%.2f");
+    ImGui::DragFloat("SL multiplier", &g_settings.slMult, 0.1f, 0.5f, 10.0f, "%.2f");
+
+    ImGui::SeparatorText("Window");
     ImGui::DragInt("Interval (minutes)", &g_settings.intervalMinutes, 1, 1, 60);
-
-    ImGui::Separator();
     if (ImGui::Button("Reset window", ImVec2(-1, 0))) {
         g_signalBuffer.clear();
         g_spreadSum = 0.0;
         g_windowStart = std::chrono::steady_clock::now();
-        logLine("Window manually reset.", IM_COL32(180, 180, 180, 255));
+        logLine("Window manually reset.", col::textDim);
     }
 
     ImGui::End();
 }
 
+// ---------------------------------------------------------------------------
+// ticker chart (custom draw)
+// ---------------------------------------------------------------------------
 static void drawChartPanel() {
-    ImGui::SetNextWindowSize(ImVec2(860, 420), ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowPos(ImVec2(400, 360), ImGuiCond_FirstUseEver);
+    Layout L = layout();
+    applyPanelPlacement(L.chartPos, L.chartSz);
     ImGui::Begin("Ticker Chart");
+    ImDrawList* dl = ImGui::GetWindowDrawList();
 
     if (g_midHistory.empty()) {
-        ImGui::TextWrapped("No quotes received yet. Start the feed to see the ticker movement.");
+        centerHint("Start the feed to see the ticker movement.");
         ImGui::End();
         return;
     }
 
-    ImGui::TextUnformatted("Legend:");
+    ImGui::TextColored(ImVec4(0.345f, 0.651f, 1.0f, 1.0f), "Bid");
     ImGui::SameLine();
-    ImGui::ColorButton("##bid_legend", ImVec4(0.30f, 0.55f, 0.95f, 1.0f), ImGuiColorEditFlags_NoTooltip, ImVec2(12, 12));
+    ImGui::TextColored(ImVec4(0.973f, 0.318f, 0.286f, 1.0f), "Ask");
     ImGui::SameLine();
-    ImGui::TextUnformatted("Bid");
+    ImGui::TextColored(ImVec4(0.824f, 0.600f, 0.133f, 1.0f), "Mid");
     ImGui::SameLine();
-    ImGui::ColorButton("##ask_legend", ImVec4(0.95f, 0.40f, 0.35f, 1.0f), ImGuiColorEditFlags_NoTooltip, ImVec2(12, 12));
-    ImGui::SameLine();
-    ImGui::TextUnformatted("Ask");
-    ImGui::SameLine();
-    ImGui::ColorButton("##mid_legend", ImVec4(0.95f, 0.85f, 0.25f, 1.0f), ImGuiColorEditFlags_NoTooltip, ImVec2(12, 12));
-    ImGui::SameLine();
-    ImGui::TextUnformatted("Mid");
-    ImGui::SameLine();
-    ImGui::TextDisabled("(%zu points)", g_midHistory.size());
+    ImGui::TextDisabled("(%zu pts)", g_midHistory.size());
 
     ImVec2 avail = ImGui::GetContentRegionAvail();
     ImVec2 pMin = ImGui::GetCursorScreenPos();
     ImVec2 pMax(pMin.x + avail.x, pMin.y + avail.y);
-    if (avail.y > 16.0f) {
-        ImGui::InvisibleButton("##chart", avail);
+    if (avail.y <= 16.0f) { ImGui::End(); return; }
 
-        ImDrawList* dl = ImGui::GetWindowDrawList();
-        dl->AddRectFilled(pMin, pMax, IM_COL32(20, 20, 24, 255));
-        dl->AddRect(pMin, pMax, IM_COL32(70, 70, 80, 255));
+    ImGui::InvisibleButton("##chart", avail);
+    bool hovered = ImGui::IsItemHovered();
 
-        float lo = FLT_MAX, hi = -FLT_MAX;
-        for (size_t i = 0; i < g_bidHistory.size(); ++i) {
-            lo = std::min(lo, (float)g_bidHistory[i]);
-            lo = std::min(lo, (float)g_askHistory[i]);
-            lo = std::min(lo, (float)g_midHistory[i]);
-            hi = std::max(hi, (float)g_bidHistory[i]);
-            hi = std::max(hi, (float)g_askHistory[i]);
-            hi = std::max(hi, (float)g_midHistory[i]);
+    dl->AddRectFilled(pMin, pMax, col::bg);
+    dl->AddRect(pMin, pMax, col::border);
+
+    float lo = FLT_MAX, hi = -FLT_MAX;
+    for (size_t i = 0; i < g_midHistory.size(); ++i) {
+        lo = std::min({lo, (float)g_bidHistory[i], (float)g_askHistory[i], (float)g_midHistory[i]});
+        hi = std::max({hi, (float)g_bidHistory[i], (float)g_askHistory[i], (float)g_midHistory[i]});
+    }
+    float pad = (hi - lo) * 0.06f;
+    if (pad < 1e-6f) pad = 0.5f;
+    lo -= pad;
+    hi += pad;
+    const float range = std::max(hi - lo, 1e-6f);
+
+    const float labelW = 48.0f;
+    const float plotL = pMin.x + labelW;
+    const int gridLines = 4;
+    char buf[32];
+    for (int i = 0; i <= gridLines; ++i) {
+        float t = (float)i / (float)gridLines;
+        float y = pMax.y - t * (pMax.y - pMin.y);
+        dl->AddLine(ImVec2(plotL, y), ImVec2(pMax.x, y), IM_COL32(45, 45, 55, 255));
+        float val = lo + t * range;
+        snprintf(buf, sizeof(buf), "%.2f", val);
+        dl->AddText(ImVec2(pMin.x + 4, y - 8), col::textDim, buf);
+    }
+
+    auto plot = [&](const std::deque<double>& data, ImU32 c) {
+        int n = (int)data.size();
+        if (n == 0) return;
+        if (n == 1) {
+            float y = pMax.y - (float)((data[0] - lo) / range) * (pMax.y - pMin.y);
+            dl->AddCircleFilled(ImVec2(plotL, y), 3.0f, c);
+            return;
         }
-        float pad = (hi - lo) * 0.08f;
-        if (pad < 1e-6f) { pad = 0.5f; }
-        lo -= pad;
-        hi += pad;
-        const float range = (hi - lo) > 1e-9f ? (hi - lo) : 1.0f;
-
-        // Grid lines + y-axis labels
-        const int gridLines = 4;
-        char buf[32];
-        for (int i = 0; i <= gridLines; ++i) {
-            float t = (float)i / (float)gridLines;
-            float y = pMax.y - t * (pMax.y - pMin.y);
-            dl->AddLine(ImVec2(pMin.x, y), ImVec2(pMax.x, y), IM_COL32(45, 45, 52, 255));
-            float val = lo + t * range;
-            snprintf(buf, sizeof(buf), "%.2f", val);
-            dl->AddText(ImVec2(pMin.x + 4, y - 8), IM_COL32(160, 160, 170, 255), buf);
+        std::vector<ImVec2> pts;
+        pts.reserve(n);
+        float step = (pMax.x - plotL) / (float)(n - 1);
+        for (int i = 0; i < n; ++i) {
+            float x = plotL + step * (float)i;
+            float y = pMax.y - (float)((data[i] - lo) / range) * (pMax.y - pMin.y);
+            pts.push_back(ImVec2(x, y));
         }
+        dl->AddPolyline(pts.data(), (int)pts.size(), c, 0, 1.6f);
+    };
+    plot(g_bidHistory, col::blue);
+    plot(g_askHistory, col::red);
+    plot(g_midHistory, col::yellow);
 
-        auto plotLine = [&](const std::deque<double>& data, ImU32 color) {
-            if (data.empty()) return;
-            int n = (int)data.size();
-            std::vector<ImVec2> pts;
-            pts.reserve(n);
-            float x = pMax.x;
-            float xStep = (pMax.x - pMin.x) / (float)(CHART_CAP - 1);
-            for (int i = n - 1; i >= 0; --i) {
-                float y = pMax.y - (float)((data[i] - lo) / range) * (pMax.y - pMin.y);
-                pts.push_back(ImVec2(x, y));
-                x -= xStep;
-            }
-            dl->AddPolyline(pts.data(), (int)pts.size(), color, 0, 2.0f);
-        };
-
-        plotLine(g_bidHistory, IM_COL32(77, 140, 242, 255));
-        plotLine(g_askHistory, IM_COL32(242, 102, 89, 255));
-        plotLine(g_midHistory, IM_COL32(242, 217, 64, 255));
-
-        // Hover: show values at the mouse position
-        if (ImGui::IsItemHovered()) {
-            ImVec2 mouse = ImGui::GetIO().MousePos;
-            ImGui::SetTooltip("Bid: %s\nAsk: %s\nMid: %s",
-                              formatPrice(g_bidHistory.back()).c_str(),
-                              formatPrice(g_askHistory.back()).c_str(),
-                              formatPrice(g_midHistory.back()).c_str());
+    if (hovered) {
+        int n = (int)g_midHistory.size();
+        float mx = ImGui::GetIO().MousePos.x;
+        int idx;
+        if (n == 1) {
+            idx = 0;
+        } else {
+            float step = (pMax.x - plotL) / (float)(n - 1);
+            idx = (int)std::round((mx - plotL) / step);
+            idx = std::clamp(idx, 0, n - 1);
         }
+        float hx = (n == 1) ? plotL : plotL + ((pMax.x - plotL) / (float)(n - 1)) * idx;
+        dl->AddLine(ImVec2(hx, pMin.y), ImVec2(hx, pMax.y), col::border);
+        float my = pMax.y - (float)((g_midHistory[idx] - lo) / range) * (pMax.y - pMin.y);
+        dl->AddCircleFilled(ImVec2(hx, my), 3.0f, col::yellow);
+
+        ImGui::SetTooltip("Bid: %s\nAsk: %s\nMid: %s\nSpread: %s",
+                          formatPrice(g_bidHistory[idx]).c_str(),
+                          formatPrice(g_askHistory[idx]).c_str(),
+                          formatPrice(g_midHistory[idx]).c_str(),
+                          formatPrice(g_askHistory[idx] - g_bidHistory[idx], 3).c_str());
     }
 
     ImGui::End();
 }
 
+// ---------------------------------------------------------------------------
+// market data
+// ---------------------------------------------------------------------------
 static void drawMarketPanel() {
-    ImGui::SetNextWindowSize(ImVec2(640, 320), ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowPos(ImVec2(400, 30), ImGuiCond_FirstUseEver);
+    Layout L = layout();
+    applyPanelPlacement(L.marketPos, L.marketSz);
     ImGui::Begin("Market Data");
 
     if (g_bookData.empty()) {
-        ImGui::TextWrapped("No quotes received yet. Start the feed to see live data.");
+        centerHint("Start the feed to see live data.");
         ImGui::End();
         return;
     }
@@ -609,32 +817,45 @@ static void drawMarketPanel() {
     QuoteMetrics m = computeMetrics(q);
 
     ImGui::TextUnformatted("MID");
+    ImGui::SameLine();
+    ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(signalColor(g_lastSignal)),
+                       "[%s]", g_lastSignal.c_str());
     if (g_bigFont) ImGui::PushFont(g_bigFont);
-    ImGui::TextColored(ImVec4(0.95f, 0.95f, 0.95f, 1.0f), "%s", formatPrice(m.mid).c_str());
+    ImGui::TextColored(ImVec4(0.902f, 0.929f, 0.953f, 1.0f), "%s",
+                       formatPrice(m.mid).c_str());
     if (g_bigFont) ImGui::PopFont();
 
-    ImGui::SameLine();
-    ImGui::TextUnformatted("   Current signal:");
-    ImGui::SameLine();
-    if (g_bigFont) ImGui::PushFont(g_bigFont);
-    ImVec4 sc = ImGui::ColorConvertU32ToFloat4(signalColor(g_lastSignal));
-    ImGui::TextColored(sc, "%s", g_lastSignal.c_str());
-    if (g_bigFont) ImGui::PopFont();
+    ImGui::SeparatorText("Order book");
+    if (ImGui::BeginTable("book", 2, ImGuiTableFlags_SizingStretchProp)) {
+        ImGui::TableSetupColumn("left", ImGuiTableColumnFlags_WidthStretch, 1.0f);
+        ImGui::TableSetupColumn("right", ImGuiTableColumnFlags_WidthStretch, 1.0f);
+        ImGui::TableNextRow();
 
-    ImGui::Separator();
-    ImGui::Columns(2, "mkt", false);
-    ImGui::Text("Bid:   %s  (vol %s)", formatPrice(q.bid).c_str(), formatPrice(q.bid_volume, 0).c_str());
-    ImGui::Text("Ask:   %s  (vol %s)", formatPrice(q.ask).c_str(), formatPrice(q.ask_volume, 0).c_str());
-    ImGui::Text("Spread: %s", formatPrice(m.spread, 3).c_str());
-    ImGui::NextColumn();
-    ImGui::Text("Weighted mid: %s", formatPrice(m.wmid).c_str());
-    ImGui::Text("Bid-ratio:    %s", formatPrice(m.ratio, 3).c_str());
-    ImGui::Text("Last update: %s", nowStr().c_str());
-    ImGui::Columns(1);
+        ImGui::TableNextColumn();
+        ImGui::Text("Bid");      ImGui::SameLine();
+        ImGui::TextColored(colF(col::blue), "%s", formatPrice(q.bid).c_str());
+        ImGui::Text("Vol");      ImGui::SameLine();
+        ImGui::TextDisabled("%s", formatPrice(q.bid_volume, 0).c_str());
 
-    ImGui::ProgressBar((float)m.ratio, ImVec2(-1, 20), "bid-ratio");
+        ImGui::TableNextColumn();
+        ImGui::Text("Ask");      ImGui::SameLine();
+        ImGui::TextColored(colF(col::red), "%s", formatPrice(q.ask).c_str());
+        ImGui::Text("Vol");      ImGui::SameLine();
+        ImGui::TextDisabled("%s", formatPrice(q.ask_volume, 0).c_str());
+        ImGui::EndTable();
+    }
 
-    ImGui::Separator();
+    ImGui::Text("Spread");      ImGui::SameLine();
+    ImGui::TextColored(colF(col::yellow), "%s", formatPrice(m.spread, 3).c_str());
+    ImGui::Text("Weighted mid"); ImGui::SameLine();
+    ImGui::TextColored(colF(col::accent), "%s", formatPrice(m.wmid).c_str());
+
+    ImGui::SeparatorText("Bid ratio");
+    ImGui::ProgressBar((float)m.ratio, ImVec2(-1, 18),
+                       formatPrice(m.ratio, 3).c_str());
+    ImGui::TextDisabled("Last update: %s", nowStr().c_str());
+
+    ImGui::SeparatorText("Mid price");
     if (!g_midHistory.empty()) {
         float lo = FLT_MAX, hi = -FLT_MAX;
         std::vector<float> mids(g_midHistory.begin(), g_midHistory.end());
@@ -643,16 +864,19 @@ static void drawMarketPanel() {
             hi = std::max(hi, v);
         }
         if (hi - lo < 1e-6) { lo -= 0.5f; hi += 0.5f; }
-        ImGui::PlotLines("Mid price", mids.data(), (int)mids.size(),
-                         0, nullptr, lo, hi, ImVec2(-1, 90));
+        ImGui::PlotLines("##mid", mids.data(), (int)mids.size(),
+                         0, nullptr, lo, hi, ImVec2(-1, 60));
     }
 
     ImGui::End();
 }
 
+// ---------------------------------------------------------------------------
+// signals
+// ---------------------------------------------------------------------------
 static void drawSignalPanel() {
-    ImGui::SetNextWindowSize(ImVec2(390, 360), ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowPos(ImVec2(1050, 30), ImGuiCond_FirstUseEver);
+    Layout L = layout();
+    applyPanelPlacement(L.signalsPos, L.signalsSz);
     ImGui::Begin("Signals");
 
     int buy = 0, sell = 0, neu = 0;
@@ -667,20 +891,37 @@ static void drawSignalPanel() {
     auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - g_windowStart).count();
     int remaining = (int)std::max(0LL, (long long)intervalSec - elapsed);
 
-    ImGui::TextUnformatted("Window");
     ImGui::Text("Ticks: %zu", g_signalBuffer.size());
-    ImGui::Text("Time to decision: %02d:%02d", remaining / 60, remaining % 60);
+    ImGui::Text("Decision in: %02d:%02d", remaining / 60, remaining % 60);
 
-    ImGui::Separator();
-    ImGui::TextUnformatted("Counts in this window:");
-    ImGui::TextColored(ImVec4(0.3f, 0.85f, 0.45f, 1.0f), "BUY      %d", buy);
-    ImGui::TextColored(ImVec4(0.9f, 0.4f, 0.4f, 1.0f), "SELL     %d", sell);
-    ImGui::TextColored(ImVec4(0.9f, 0.75f, 0.35f, 1.0f), "NEUTRAL  %d", neu);
+    ImGui::SeparatorText("Counts this window");
+    ImGui::TextColored(colF(col::green), "BUY     %d", buy);
+    ImGui::TextColored(colF(col::red),   "SELL    %d", sell);
+    ImGui::TextColored(colF(col::yellow), "NEUTRAL %d", neu);
 
-    float counts[3] = {(float)buy, (float)sell, (float)neu};
-    ImGui::PlotHistogram("##counts", counts, 3, 0, nullptr, 0.0f, FLT_MAX, ImVec2(-1, 60));
+    // colored bar chart
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    ImVec2 a = ImGui::GetCursorScreenPos();
+    float bw = ImGui::GetContentRegionAvail().x;
+    const float barH = 54.0f;
+    const float gap = 6.0f;
+    const float w = (bw - 2.0f * gap) / 3.0f;
+    int maxCount = std::max({buy, sell, neu, 1});
+    auto bar = [&](float x, ImU32 c, int val) {
+        float h = barH * ((float)val / (float)maxCount);
+        dl->AddRectFilled(ImVec2(a.x + x, a.y + barH - h),
+                          ImVec2(a.x + x + w, a.y + barH), c);
+        char lbl[16];
+        snprintf(lbl, sizeof(lbl), "%d", val);
+        dl->AddText(ImVec2(a.x + x + w * 0.5f - 6.0f, a.y + barH - h - 16.0f),
+                    col::text, lbl);
+    };
+    bar(0.0f, col::green, buy);
+    bar(w + gap, col::red, sell);
+    bar(2.0f * (w + gap), col::yellow, neu);
+    ImGui::Dummy(ImVec2(bw, barH + 18.0f));
 
-    ImGui::Separator();
+    ImGui::SeparatorText("Expected majority");
     std::string decision = "NEUTRAL";
     int best = std::max({buy, sell, neu});
     if (best > 0) {
@@ -688,9 +929,7 @@ static void drawSignalPanel() {
         else if (sell == best) decision = "SELL";
         else decision = "NEUTRAL";
     }
-    ImGui::TextUnformatted("Expected majority:");
-    ImVec4 dc = ImGui::ColorConvertU32ToFloat4(signalColor(decision));
-    ImGui::TextColored(dc, "%s", decision.c_str());
+    ImGui::TextColored(colF(signalColor(decision)), "%s", decision.c_str());
 
     ImGui::Separator();
     if (ImGui::Button("Decide now", ImVec2(-1, 0))) {
@@ -700,29 +939,41 @@ static void drawSignalPanel() {
     ImGui::End();
 }
 
+// ---------------------------------------------------------------------------
+// decisions
+// ---------------------------------------------------------------------------
 static void drawDecisionPanel() {
-    ImGui::SetNextWindowSize(ImVec2(760, 300), ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowPos(ImVec2(10, 400), ImGuiCond_FirstUseEver);
+    Layout L = layout();
+    applyPanelPlacement(L.decPos, L.decSz);
     ImGui::Begin("Decisions");
 
-    if (ImGui::BeginTable("dec", 9, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersV |
-                                    ImGuiTableFlags_BordersH | ImGuiTableFlags_ScrollY)) {
-        ImGui::TableSetupColumn("Time");
-        ImGui::TableSetupColumn("Decision");
-        ImGui::TableSetupColumn("BUY");
-        ImGui::TableSetupColumn("SELL");
-        ImGui::TableSetupColumn("NEU");
-        ImGui::TableSetupColumn("Entry");
-        ImGui::TableSetupColumn("TP");
-        ImGui::TableSetupColumn("SL");
-        ImGui::TableSetupColumn("Order");
+    if (g_decisions.empty()) {
+        centerHint("No decisions yet.");
+        ImGui::End();
+        return;
+    }
+
+    if (ImGui::BeginTable("dec", 9,
+                          ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersV |
+                          ImGuiTableFlags_BordersH | ImGuiTableFlags_ScrollY |
+                          ImGuiTableFlags_ScrollX)) {
+        ImGui::TableSetupColumn("Time",    ImGuiTableColumnFlags_WidthFixed, 70.0f);
+        ImGui::TableSetupColumn("Decision", ImGuiTableColumnFlags_WidthFixed, 80.0f);
+        ImGui::TableSetupColumn("BUY",     ImGuiTableColumnFlags_WidthFixed, 45.0f);
+        ImGui::TableSetupColumn("SELL",    ImGuiTableColumnFlags_WidthFixed, 45.0f);
+        ImGui::TableSetupColumn("NEU",     ImGuiTableColumnFlags_WidthFixed, 45.0f);
+        ImGui::TableSetupColumn("Entry",   ImGuiTableColumnFlags_WidthFixed, 80.0f);
+        ImGui::TableSetupColumn("TP",      ImGuiTableColumnFlags_WidthFixed, 80.0f);
+        ImGui::TableSetupColumn("SL",      ImGuiTableColumnFlags_WidthFixed, 80.0f);
+        ImGui::TableSetupColumn("Order",   ImGuiTableColumnFlags_WidthFixed, 60.0f);
+        ImGui::TableSetupScrollFreeze(0, 1);
         ImGui::TableHeadersRow();
 
         for (auto it = g_decisions.begin(); it != g_decisions.end(); ++it) {
             ImGui::TableNextRow();
-            ImGui::TableNextColumn(); ImGui::TextUnformatted(it->timeStr.c_str());
+            ImGui::TableNextColumn(); ImGui::TextDisabled("%s", it->timeStr.c_str());
             ImGui::TableNextColumn(); ImGui::TextColored(
-                ImGui::ColorConvertU32ToFloat4(signalColor(it->decision)), "%s", it->decision.c_str());
+                colF(signalColor(it->decision)), "%s", it->decision.c_str());
             ImGui::TableNextColumn(); ImGui::Text("%d", it->buy);
             ImGui::TableNextColumn(); ImGui::Text("%d", it->sell);
             ImGui::TableNextColumn(); ImGui::Text("%d", it->neu);
@@ -730,8 +981,8 @@ static void drawDecisionPanel() {
             ImGui::TableNextColumn(); ImGui::Text("%s", formatPrice(it->tp).c_str());
             ImGui::TableNextColumn(); ImGui::Text("%s", formatPrice(it->sl).c_str());
             ImGui::TableNextColumn(); ImGui::TextColored(
-                it->orderPlaced ? ImVec4(0.3f, 0.85f, 0.45f, 1.0f)
-                                : ImVec4(0.6f, 0.6f, 0.6f, 1.0f),
+                it->orderPlaced ? ImVec4(0.247f, 0.725f, 0.314f, 1.0f)
+                                : ImVec4(0.545f, 0.580f, 0.620f, 1.0f),
                 "%s", it->orderPlaced ? "placed" : "-");
         }
         ImGui::EndTable();
@@ -740,9 +991,12 @@ static void drawDecisionPanel() {
     ImGui::End();
 }
 
+// ---------------------------------------------------------------------------
+// log
+// ---------------------------------------------------------------------------
 static void drawLogPanel() {
-    ImGui::SetNextWindowSize(ImVec2(680, 300), ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowPos(ImVec2(780, 400), ImGuiCond_FirstUseEver);
+    Layout L = layout();
+    applyPanelPlacement(L.logPos, L.logSz);
     ImGui::Begin("Log");
 
     ImGui::Checkbox("Log every quote", &g_logEveryQuote);
@@ -755,17 +1009,21 @@ static void drawLogPanel() {
     }
 
     ImGui::Separator();
-    if (ImGui::BeginChild("##logscroll", ImVec2(0, 0), false,
+    if (ImGui::BeginChild("##logscroll", ImVec2(0, 0), true,
                           ImGuiWindowFlags_HorizontalScrollbar)) {
         std::vector<LogEntry> snapshot;
         {
             std::lock_guard<std::mutex> lock(g_logMutex);
             snapshot.assign(g_log.begin(), g_log.end());
         }
-        for (const auto& e : snapshot) {
-            ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(e.color), "%s", e.text.c_str());
+        if (snapshot.empty()) {
+            ImGui::TextDisabled("No log entries.");
+        } else {
+            for (const auto& e : snapshot) {
+                ImGui::TextColored(colF(e.color), "%s", e.text.c_str());
+            }
+            if (g_autoScroll) ImGui::SetScrollHereY(1.0f);
         }
-        if (g_autoScroll) ImGui::SetScrollHereY(1.0f);
         ImGui::EndChild();
     }
 
@@ -773,7 +1031,7 @@ static void drawLogPanel() {
 }
 
 // ---------------------------------------------------------------------------
-// WSL2-proof window setup
+// wsl2-safe window setup
 // ---------------------------------------------------------------------------
 static void glfwErrorCallback(int code, const char* desc) {
     std::cerr << "GLFW error (" << code << "): " << (desc ? desc : "?") << "\n";
@@ -781,8 +1039,7 @@ static void glfwErrorCallback(int code, const char* desc) {
 
 int main() {
     std::ios::sync_with_stdio(false);
-    logLine("Flow++ GUI started. Close the window to stop.",
-            IM_COL32(200, 200, 200, 255));
+    logLine("Flow++ GUI started. Close the window to stop.", col::text);
 
     glfwSetErrorCallback(glfwErrorCallback);
     if (!glfwInit()) {
@@ -794,7 +1051,16 @@ int main() {
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
 
-    GLFWwindow* window = glfwCreateWindow(1500, 900, "Flow++ - Alpaca trading GUI",
+    // clamp the window to the monitor so panels stay on screen
+    int wndW = 1600, wndH = 1000;
+    GLFWmonitor* mon = glfwGetPrimaryMonitor();
+    if (mon) {
+        int wx, wy, ww, wh;
+        glfwGetMonitorWorkarea(mon, &wx, &wy, &ww, &wh);
+        wndW = std::min(wndW, ww - 20);
+        wndH = std::min(wndH, wh - 40);
+    }
+    GLFWwindow* window = glfwCreateWindow(wndW, wndH, "Flow++ - Alpaca trading GUI",
                                           nullptr, nullptr);
     if (!window) {
         const char* desc = nullptr;
@@ -815,11 +1081,7 @@ int main() {
     ImGuiIO& io = ImGui::GetIO();
     io.IniFilename = "flow_gui.ini";
 
-    ImGui::StyleColorsDark();
-    ImGuiStyle& style = ImGui::GetStyle();
-    style.WindowRounding = 5.0f;
-    style.FrameRounding = 3.0f;
-    style.WindowBorderSize = 1.0f;
+    applyTheme();
 
     ImFontConfig cfg;
     cfg.SizePixels = 15.0f;
@@ -833,8 +1095,7 @@ int main() {
 
     // route order results to the gui log instead of stdout
     setOrderLogCallback([](const std::string& msg, bool isError) {
-        logLine(msg, isError ? IM_COL32(235, 90, 90, 255)
-                             : IM_COL32(80, 220, 120, 255));
+        logLine(msg, isError ? col::red : col::green);
     });
 
     while (!glfwWindowShouldClose(window)) {
@@ -854,6 +1115,8 @@ int main() {
         drawSignalPanel();
         drawDecisionPanel();
         drawLogPanel();
+
+        if (g_forceLayout) g_forceLayout = false;
 
         glClearColor(0.06f, 0.06f, 0.07f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT);

@@ -8,6 +8,10 @@ The name is a nod to both the flow of market data and C++. The project is called
 
 Connects to the Alpaca IEX quote stream for a symbol (default `SPY`). For every quote it computes a **weighted mid price** and the bid/ask volume ratio, then classifies it as `BUY`, `SELL` or `NEUTRAL`. Signals pile up over a **5-minute** window; whichever signal shows up most often decides whether a (bracket) order goes out.
 
+## License
+
+MIT-style-ish, but shorter. You may use, modify and share the code as long as you keep this copyright notice and your modified version stays open source (no closed-source forks without my permission). See [LICENSE](LICENSE).
+
 ## Layout
 
 | File | What it does |
