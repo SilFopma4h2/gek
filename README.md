@@ -63,13 +63,14 @@ Omdat het om een tijdvenster gaat, varieert het aantal ticks per venster; de gem
 ## Build & Run
 
 ```bash
-./build.sh
+./build.sh            # bouwt en start de console-versie (gek)
+./build.sh --gui      # bouwt en start de GUI-versie (gek_gui)
 ```
 
-Dit script:
+`build.sh`:
 1. Zet de Alpaca API-credentials als environment variables
 2. Configureert en bouwt het project met CMake
-3. Start de resulterende `gek`-executable
+3. Start de `gek`-executable, of `gek_gui` bij `--gui`
 
 Handmatig:
 
