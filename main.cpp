@@ -12,16 +12,15 @@
 #include <chrono>
 #include <csignal>
 #include "order.h"
-//Hier de confg
+// Config
 const std::string symbol = "SPY";
-// Beslissing wordt niet meer op een vast aantal ticks genomen,
-// maar op een tijdvenster: iedere 5 minuten.
-const int DECISION_INTERVAL_SECONDS = 5 * 60; // 5 minuten
-//Hier zet je aan of je een order wil plaatsen.
+// Decision runs on a time window (every 5 minutes), not a fixed tick count.
+const int DECISION_INTERVAL_SECONDS = 5 * 60; // 5 minutes
+// Set to true to place orders.
 const bool orderyes = false;
 
-// TP/SL als multiplier van de gemiddelde spread over het venster (volatiliteit-gebaseerd).
-// R:R van 2:1 (TP verder weg dan SL).
+// TP/SL as a multiplier of the average spread over the window (volatility-based).
+// R:R of 2:1 (TP further away than SL).
 const double TP_SPREAD_MULTIPLIER = 3.0;
 const double SL_SPREAD_MULTIPLIER = 1.5;
 
@@ -32,76 +31,75 @@ struct OrderBook {
     double ask_volume;
 };
 
-//Hier word de data opgeslagen
+// Incoming quote data
 std::deque<OrderBook> Apple_Book_Data;
 
 static std::mutex bookMutex;
 static std::condition_variable bookCv;
 static bool newDataAvailable = false;
 
-// Buffer voor de meerderheids-beslissing over een tijdsvenster (5 min).
+// Buffer for the majority decision over a time window (5 min).
 static std::vector<std::string> signalBuffer;
 static double spreadSum = 0.0;
 static double lastMid = 0.0;
 static std::chrono::steady_clock::time_point windowStart =
     std::chrono::steady_clock::now();
 
-// Nette shutdown via SIGINT/SIGTERM.
+// Clean shutdown via SIGINT/SIGTERM.
 static volatile std::sig_atomic_t g_stop = 0;
 static void handleSignal(int) {
     g_stop = 1;
 }
 
-// Functie die het signaal bepaalt op basis van 1 enkele quote
+// Function that determines the signal based on a single quote
 std::string evaluateSignal(const OrderBook& book) {
-    // 1. Basis berekeningen
+    // 1. Basic calculations
     double spread = book.ask - book.bid;
     double mid = (book.bid + book.ask) / 2.0;
 
-    // Veiligheidscheck om delen door nul te voorkomen
+    // Safety check to avoid division by zero
     double wmid = mid;
 
-    //Formule voor de Gewogen midden.
+    // Weighted mid formula.
     if ((book.bid_volume + book.ask_volume) > 0) {
         wmid = (book.bid_volume * book.ask + book.ask_volume * book.bid) / (book.bid_volume + book.ask_volume);
     }
 
-    //Nu maken we de Ratio formule en die sluit perfect aan op Wpm.
-    //Veiligheidscheck om NaN te voorkomen bij zero volumes (net als bij wmid).
+    // Bid share of the total volume; guard against zero volumes.
     double Ratio = 0.0;
     if ((book.bid_volume + book.ask_volume) > 0) {
         Ratio = (double)book.bid_volume / (book.bid_volume + book.ask_volume);
     }
 
-    // Print de basisdata
+    // Print the base data
     std::cout << "Bid: " << book.bid << " | Ask: " << book.ask << " | Spread: " << spread << "\n";
     std::cout << "Mid: " << mid << " | Weighted Mid: " << wmid << "\n";
 
-    // Bijhouden voor de meerderheids-beslissing
+    // Track for the majority decision
     spreadSum += spread;
     lastMid = mid;
 
-    // 2. Signaal logica (Gebaseerd op Weighted Mid vs Mid)
+    // 2. Signal logic (based on Weighted Mid vs Mid)
     std::cout << "SIGNAL: ";
     if (wmid > mid && Ratio > 0.60) {
-        std::cout << " BUY  (Kopersdruk dominant)\n";
+        std::cout << " BUY  (Buyer pressure dominant)\n";
         return "BUY";
     }
     else if (wmid < mid && Ratio < 0.40) {
-        std::cout << " SELL  (Verkopersdruk dominant)\n";
+        std::cout << " SELL  (Seller pressure dominant)\n";
         return "SELL";
     } else {
-        std::cout << "NEUTRAAL (Volumes in balans)\n";
-        return "NEUTRAAL";
+        std::cout << "NEUTRAL (Volumes in balance)\n";
+        return "NEUTRAL";
     }
 }
 
-// Telt welk signaal het vaakst voorkwam in de buffer.
+// Counts which signal occurred most often in the buffer.
 std::string majoritySignal(const std::vector<std::string>& signals) {
     std::map<std::string, int> counts;
     for (const auto& s : signals) counts[s]++;
 
-    std::string best = "NEUTRAAL";
+    std::string best = "NEUTRAL";
     int bestCount = -1;
     for (const auto& [sig, count] : counts) {
         if (count > bestCount) {
@@ -110,30 +108,25 @@ std::string majoritySignal(const std::vector<std::string>& signals) {
         }
     }
 
-    std::cout << "== Telling laatste " << signals.size() << " signalen: "
+    std::cout << "== Counting last " << signals.size() << " signals: "
               << "BUY=" << counts["BUY"]
               << " SELL=" << counts["SELL"]
-              << " NEUTRAAL=" << counts["NEUTRAAL"]
-              << " => Meerderheid: " << best << " ==\n";
+              << " NEUTRAL=" << counts["NEUTRAL"]
+              << " => Majority: " << best << " ==\n";
 
     return best;
 }
 
-// Plaatst een bracket order (TP/SL) o.b.v. het meerderheidssignaal en de
-// gemiddelde spread over het venster als volatiliteitsmaat.
-// Entry is een limit order op de actuele mid-price, zodat TP/SL aan een
-// bekende instapprijs verankerd zijn (i.p.v. aan een onbekende markt-fill).
-
+// Places a bracket order (TP/SL) from the majority signal, using the average
+// spread over the window as a volatility measure. Entry is a limit order at
+// the current mid, so TP/SL anchor to a known entry price.
 void order(const std::string& signal, int tickCount) {
-    // Check eerst of orders aan staan
     if (!orderyes) {
-        std::cout << "orders zijn uitgeschakeld, geen orders geplaatst\n";
-        return; // Breekt de functie af
+        std::cout << "orders are disabled, no orders placed\n";
+        return;
     }
 
-    // Code komt pas hier als orderyes true is, geen extra if meer nodig.
-    // Het aantal ticks in een venster varieert (tijdvenster i.p.v. vaste
-    // telling), dus deel de spread-som door het werkelijke aantal.
+    // Tick count varies per window, so divide the spread sum by the real count.
     double avgSpread = tickCount > 0 ? spreadSum / tickCount : 0.0;
     double entry = lastMid;
 
@@ -154,7 +147,7 @@ void order(const std::string& signal, int tickCount) {
         sendBracketOrder(symbol, "sell", "1", entry, tp, sl);
     }
     else {
-        std::cout << "Geen order. Meerderheid was NEUTRAAL\n";
+        std::cout << "No order. Majority was NEUTRAL\n";
     }
 }
 
@@ -164,7 +157,7 @@ int main() {
     const char* key    = std::getenv("ALPACA_API_KEY");
     const char* secret = std::getenv("ALPACA_API_SECRET");
     if (!key || !secret) {
-        std::cerr << "ALPACA_API_KEY / ALPACA_API_SECRET niet gezet\n";
+        std::cerr << "ALPACA_API_KEY / ALPACA_API_SECRET not set\n";
         return 1;
     }
 
@@ -202,7 +195,7 @@ int main() {
                 OrderBook latestBook = Apple_Book_Data.back();
                 lock.unlock();
 
-                std::cout << "\n-- Nieuwe quote binnengekomen --\n";
+                std::cout << "\n-- New quote received --\n";
                 std::string signal = evaluateSignal(latestBook);
                 signalBuffer.push_back(signal);
             } else {
@@ -210,8 +203,7 @@ int main() {
             }
         }
 
-        // Tijdvenster-controle: ook bij timeout/spurious wake, zodat een
-        // beslissing nooit wordt gemist als er tijdelijk geen data is.
+        // Also runs on timeout/spurious wake so a decision is never skipped.
         auto now = std::chrono::steady_clock::now();
         if (now - windowStart >= std::chrono::seconds(DECISION_INTERVAL_SECONDS)) {
             if (!signalBuffer.empty()) {
@@ -219,7 +211,7 @@ int main() {
                 order(decision, static_cast<int>(signalBuffer.size()));
             }
 
-            // Reset venster voor de volgende 5 minuten
+            // Reset window for the next 5 minutes
             signalBuffer.clear();
             spreadSum = 0.0;
             windowStart = now;
@@ -228,6 +220,6 @@ int main() {
 
     client.stop();
     feed_thread.join();
-    std::cout << "gek gestopt.\n";
+    std::cout << "Flow++ stopped.\n";
     return 0;
 }

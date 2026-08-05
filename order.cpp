@@ -17,20 +17,33 @@
 #include <curl/curl.h>
 
 namespace {
-// Helper om een prijs netjes op 2 decimalen te formatteren (Alpaca eist dit).
+// Optional UI log callback (intended for the GUI; see setOrderLogCallback).
+OrderLogCallback g_orderLogCb;
+
+// Helper to format a price on 2 decimals (required by Alpaca).
 std::string formatPrice(double price) {
     std::ostringstream oss;
     oss << std::fixed << std::setprecision(2) << price;
     return oss.str();
 }
 
-// Gedeelde logica om een order-body naar Alpaca te sturen.
+void logOrder(const std::string& msg, bool isError) {
+    if (g_orderLogCb) {
+        g_orderLogCb(msg, isError);
+    } else if (isError) {
+        std::cerr << msg << "\n";
+    } else {
+        std::cout << msg << "\n";
+    }
+}
+
+// Shared logic to send an order body to Alpaca.
 void postOrder(const nlohmann::json& body) {
     const char* key = std::getenv("ALPACA_API_KEY");
     const char* secret = std::getenv("ALPACA_API_SECRET");
 
     if (!key || !secret) {
-        std::cerr << "ALPACA_API_KEY / ALPACA_API_SECRET niet gezet, order geannuleerd\n";
+        std::cerr << "ALPACA_API_KEY / ALPACA_API_SECRET not set, order cancelled\n";
         return;
     }
 
@@ -44,7 +57,7 @@ void postOrder(const nlohmann::json& body) {
     headers = curl_slist_append(headers, ("APCA-API-SECRET-KEY: " + std::string(secret)).c_str());
     headers = curl_slist_append(headers, "Content-Type: application/json");
 
-    // Buffer om de response body op te vangen zodat we errors kunnen loggen.
+    // Buffer to capture the response body so errors can be logged.
     std::string responseBuffer;
     auto writeCallback = +[](char* ptr, size_t size, size_t nmemb, void* userdata) -> size_t {
         auto* buf = static_cast<std::string*>(userdata);
@@ -63,17 +76,21 @@ void postOrder(const nlohmann::json& body) {
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &httpCode);
 
     if (res != CURLE_OK) {
-        std::cerr << "Order fout (curl): " << curl_easy_strerror(res) << "\n";
+        logOrder("Order error (curl): " + std::string(curl_easy_strerror(res)), true);
     } else if (httpCode >= 400) {
-        std::cerr << "Order fout (HTTP " << httpCode << "): " << responseBuffer << "\n";
+        logOrder("Order error (HTTP " + std::to_string(httpCode) + "): " + responseBuffer, true);
     } else {
-        std::cout << "Order geplaatst: " << responseBuffer << "\n";
+        logOrder("Order placed: " + responseBuffer, false);
     }
 
     curl_slist_free_all(headers);
     curl_easy_cleanup(curl);
 }
 } // namespace
+
+void setOrderLogCallback(OrderLogCallback cb) {
+    g_orderLogCb = std::move(cb);
+}
 
 void sendOrder(const std::string& symbol, const std::string& side, const std::string& qty) {
     nlohmann::json body = {
@@ -92,9 +109,9 @@ void sendBracketOrder(const std::string& symbol,
                        double entryPrice,
                        double takeProfitPrice,
                        double stopLossPrice) {
-    // Zorg dat TP/SL in de juiste richting minimaal één tick (0.01) van de
-    // entry afliggen, zodat de geformatteerde prijzen nooit samenvallen en
-    // Alpaca de bracket order niet afwijst vanwege gelijke TP/SL.
+    // Make sure TP/SL are at least one tick (0.01) away from the entry in the
+    // correct direction, so the formatted prices never coincide and Alpaca
+    // does not reject the bracket order due to equal TP/SL.
     const double MIN_STEP = 0.01;
     if (side == "buy") {
         if (takeProfitPrice < entryPrice + MIN_STEP) takeProfitPrice = entryPrice + MIN_STEP;

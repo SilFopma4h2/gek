@@ -1,7 +1,11 @@
 build/
+cmake-build-*/
 *.o
 *.out
 .idea/
+.vscode/
 
-gek/
-todo.txt
+flow_gui.ini
+webServerApiSettings.json
+.env
+*.env
