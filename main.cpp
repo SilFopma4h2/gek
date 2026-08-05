@@ -14,7 +14,9 @@
 #include "order.h"
 //Hier de confg
 const std::string symbol = "SPY";
-const int TICKS_PER_DECISION = 60;
+// Beslissing wordt niet meer op een vast aantal ticks genomen,
+// maar op een tijdvenster: iedere 5 minuten.
+const int DECISION_INTERVAL_SECONDS = 5 * 60; // 5 minuten
 //Hier zet je aan of je een order wil plaatsen.
 const bool orderyes = false;
 
@@ -37,10 +39,12 @@ static std::mutex bookMutex;
 static std::condition_variable bookCv;
 static bool newDataAvailable = false;
 
-// Buffer voor de meerderheids-beslissing over TICKS_PER_DECISION signalen.
+// Buffer voor de meerderheids-beslissing over een tijdsvenster (5 min).
 static std::vector<std::string> signalBuffer;
 static double spreadSum = 0.0;
 static double lastMid = 0.0;
+static std::chrono::steady_clock::time_point windowStart =
+    std::chrono::steady_clock::now();
 
 // Nette shutdown via SIGINT/SIGTERM.
 static volatile std::sig_atomic_t g_stop = 0;
@@ -120,15 +124,17 @@ std::string majoritySignal(const std::vector<std::string>& signals) {
 // Entry is een limit order op de actuele mid-price, zodat TP/SL aan een
 // bekende instapprijs verankerd zijn (i.p.v. aan een onbekende markt-fill).
 
-void order(const std::string& signal) {
+void order(const std::string& signal, int tickCount) {
     // Check eerst of orders aan staan
     if (!orderyes) {
         std::cout << "orders zijn uitgeschakeld, geen orders geplaatst\n";
         return; // Breekt de functie af
     }
 
-    // Code komt pas hier als orderyes true is, geen extra if meer nodig
-    double avgSpread = spreadSum / TICKS_PER_DECISION;
+    // Code komt pas hier als orderyes true is, geen extra if meer nodig.
+    // Het aantal ticks in een venster varieert (tijdvenster i.p.v. vaste
+    // telling), dus deel de spread-som door het werkelijke aantal.
+    double avgSpread = tickCount > 0 ? spreadSum / tickCount : 0.0;
     double entry = lastMid;
 
     if (signal == "BUY") {
@@ -188,28 +194,35 @@ int main() {
                         [] { return newDataAvailable || g_stop != 0; });
 
         if (g_stop != 0) break;
-        if (!newDataAvailable) continue; // timeout/spurious wake, wacht op echte data
 
-        newDataAvailable = false;
+        if (newDataAvailable) {
+            newDataAvailable = false;
 
-        if (!Apple_Book_Data.empty()) {
-            OrderBook latestBook = Apple_Book_Data.back();
-            lock.unlock();
+            if (!Apple_Book_Data.empty()) {
+                OrderBook latestBook = Apple_Book_Data.back();
+                lock.unlock();
 
-            std::cout << "\n-- Nieuwe quote binnengekomen --\n";
-            std::string signal = evaluateSignal(latestBook);
-            signalBuffer.push_back(signal);
-
-            if ((int)signalBuffer.size() >= TICKS_PER_DECISION) {
-                std::string decision = majoritySignal(signalBuffer);
-                order(decision);
-
-                // Reset venster voor de volgende 60 ticks
-                signalBuffer.clear();
-                spreadSum = 0.0;
+                std::cout << "\n-- Nieuwe quote binnengekomen --\n";
+                std::string signal = evaluateSignal(latestBook);
+                signalBuffer.push_back(signal);
+            } else {
+                lock.unlock();
             }
-        } else {
-            lock.unlock();
+        }
+
+        // Tijdvenster-controle: ook bij timeout/spurious wake, zodat een
+        // beslissing nooit wordt gemist als er tijdelijk geen data is.
+        auto now = std::chrono::steady_clock::now();
+        if (now - windowStart >= std::chrono::seconds(DECISION_INTERVAL_SECONDS)) {
+            if (!signalBuffer.empty()) {
+                std::string decision = majoritySignal(signalBuffer);
+                order(decision, static_cast<int>(signalBuffer.size()));
+            }
+
+            // Reset venster voor de volgende 5 minuten
+            signalBuffer.clear();
+            spreadSum = 0.0;
+            windowStart = now;
         }
     }
 
