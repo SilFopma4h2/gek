@@ -1051,16 +1051,9 @@ int main() {
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
 
-    // clamp the window to the monitor so panels stay on screen
-    int wndW = 1600, wndH = 1000;
-    GLFWmonitor* mon = glfwGetPrimaryMonitor();
-    if (mon) {
-        int wx, wy, ww, wh;
-        glfwGetMonitorWorkarea(mon, &wx, &wy, &ww, &wh);
-        wndW = std::min(wndW, ww - 20);
-        wndH = std::min(wndH, wh - 40);
-    }
-    GLFWwindow* window = glfwCreateWindow(wndW, wndH, "Flow++ - Alpaca trading GUI",
+    // normal window with titlebar (close/minimize), then maximized to fill
+    // the screen so it still feels fullscreen
+    GLFWwindow* window = glfwCreateWindow(1600, 1000, "Flow++ - Alpaca trading GUI",
                                           nullptr, nullptr);
     if (!window) {
         const char* desc = nullptr;
@@ -1074,6 +1067,7 @@ int main() {
     }
 
     glfwMakeContextCurrent(window);
+    glfwMaximizeWindow(window);
     glfwSwapInterval(1);
 
     IMGUI_CHECKVERSION();
@@ -1100,6 +1094,10 @@ int main() {
 
     while (!glfwWindowShouldClose(window)) {
         glfwPollEvents();
+
+        // handy way to quit quickly
+        if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS)
+            glfwSetWindowShouldClose(window, true);
 
         ImGui_ImplGlfw_NewFrame();
         ImGui_ImplOpenGL3_NewFrame();
