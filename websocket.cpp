@@ -23,7 +23,7 @@ static const std::string ALPACA_HOST = "stream.data.alpaca.markets";
 static const std::string ALPACA_PORT = "443";
 static const std::string ALPACA_PATH = "/v2/iex";
 
-// Reconnect-instellingen
+// Reconnect settings
 static const int MAX_BACKOFF_SECONDS = 60;
 static const int INITIAL_BACKOFF_SECONDS = 1;
 
@@ -50,12 +50,11 @@ void AlpacaWebSocket::notifyStatus(const std::string& msg) const {
     if (status_cb_) status_cb_(msg);
 }
 
-// Eén enkele connectiepoging. Retourneert wanneer de verbinding
-// (normaal of door fout) eindigt.
+// One connection attempt; returns when the connection closes.
 bool AlpacaWebSocket::connectAndListen() {
     if (stop_requested_.load()) return false;
 
-    notifyStatus("Verbinden met " + ALPACA_HOST + "...");
+    notifyStatus("Connecting to " + ALPACA_HOST + "...");
 
     try {
         net::io_context ioc;
@@ -81,10 +80,9 @@ bool AlpacaWebSocket::connectAndListen() {
                 req.set(beast::http::field::user_agent, "hft-orderbook-sim");
             }));
         ws.handshake(ALPACA_HOST, ALPACA_PATH);
-        notifyStatus("WebSocket verbonden, authenticatie...");
+        notifyStatus("WebSocket connected, authenticating...");
 
-        // Idle-timeout zodat een blokkerende read kan worden onderbroken voor
-        // een nette shutdown en de verbinding nooit voor altijd blijft hangen.
+        // Idle timeout so a blocking read can't hang the shutdown forever.
         websocket::stream_base::timeout timeout_opt;
         timeout_opt.handshake_timeout = std::chrono::seconds(30);
         timeout_opt.idle_timeout = std::chrono::seconds(5);
@@ -97,8 +95,8 @@ bool AlpacaWebSocket::connectAndListen() {
         };
         ws.write(net::buffer(auth_msg.dump()));
 
-        // Wacht op het auth-resultaat vóór we subscriben, zodat foutieve
-        // credentials direct zichtbaar zijn i.p.v. in een eindeloze retry-loop.
+        // Wait for auth before subscribing, so bad keys fail fast instead of
+        // retrying forever.
         beast::flat_buffer buffer;
         bool authenticated = false;
         while (ws.is_open() && !authenticated && !stop_requested_.load()) {
@@ -121,7 +119,7 @@ bool AlpacaWebSocket::connectAndListen() {
 
                 if (type == "error") {
                     std::cerr << "Alpaca error: " << evt.dump() << "\n";
-                    notifyStatus("Alpaca fout: " + evt.dump());
+                    notifyStatus("Alpaca error: " + evt.dump());
                     return false;
                 } else if (type == "success") {
                     std::cout << "Alpaca status: " << evt.dump() << "\n";
@@ -134,12 +132,12 @@ bool AlpacaWebSocket::connectAndListen() {
         }
 
         if (!authenticated) {
-            std::cerr << "Authenticatie bij Alpaca mislukt\n";
-            notifyStatus("Authenticatie mislukt");
+            std::cerr << "Alpaca authentication failed\n";
+            notifyStatus("Authentication failed");
             return false;
         }
 
-        notifyStatus("Geauthenticeerd, abonneren op: " + [this]() {
+        notifyStatus("Authenticated, subscribing to: " + [this]() {
             std::string s;
             for (size_t i = 0; i < symbols_.size(); ++i) {
                 if (i) s += ", ";
@@ -183,20 +181,20 @@ bool AlpacaWebSocket::connectAndListen() {
                     }
                 } else if (type == "error") {
                     std::cerr << "Alpaca error: " << evt.dump() << "\n";
-                    notifyStatus("Alpaca fout: " + evt.dump());
+                    notifyStatus("Alpaca error: " + evt.dump());
                 } else if (type == "success" || type == "subscription") {
                     std::cout << "Alpaca status: " << evt.dump() << "\n";
                     notifyStatus("Alpaca: " + evt.dump());
                 }
             }
         }
-        return true; // verbinding netjes gesloten
+        return true; // connection closed cleanly
     } catch (std::exception const& e) {
         if (!stop_requested_.load()) {
-            std::cerr << "WebSocket fout: " << e.what() << "\n";
-            notifyStatus("WebSocket fout: " + std::string(e.what()));
+            std::cerr << "WebSocket error: " << e.what() << "\n";
+            notifyStatus("WebSocket error: " + std::string(e.what()));
         }
-        return false; // fout, caller moet reconnecten
+        return false; // error, caller should reconnect
     }
 }
 
@@ -204,19 +202,19 @@ void AlpacaWebSocket::run() {
     int backoff = INITIAL_BACKOFF_SECONDS;
 
     while (!stop_requested_.load()) {
-        std::cout << "Verbinden met Alpaca websocket...\n";
-        notifyStatus("Reconnect over " + std::to_string(backoff) + "s...");
+        std::cout << "Connecting to Alpaca websocket...\n";
+        notifyStatus("Reconnecting in " + std::to_string(backoff) + "s...");
         bool cleanExit = connectAndListen();
 
         if (stop_requested_.load()) break;
 
         if (cleanExit) {
-            backoff = INITIAL_BACKOFF_SECONDS; // reset backoff na succesvolle sessie
+            backoff = INITIAL_BACKOFF_SECONDS; // reset backoff after a successful session
         }
 
-        std::cerr << "Verbinding verbroken, reconnect over " << backoff << "s...\n";
-        notifyStatus("Verbinding verbroken");
-        // Sleep in stappen zodat stop() direct wordt opgepikt.
+        std::cerr << "Connection lost, reconnecting in " << backoff << "s...\n";
+        notifyStatus("Connection lost");
+        // Sleep in steps so stop() is picked up quickly.
         for (int waited = 0; waited < backoff && !stop_requested_.load(); ++waited) {
             std::this_thread::sleep_for(std::chrono::seconds(1));
         }

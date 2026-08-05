@@ -4,12 +4,12 @@
 #include <functional>
 #include <atomic>
 
-// Callback-signatuur: bid, ask, bid_volume, ask_volume
-// Zo blijft deze module onafhankelijk van de OrderBook-struct in main.cpp
+// Callback signature: bid, ask, bid_volume, ask_volume
+// This keeps the module independent of the OrderBook struct in main.cpp
 using QuoteCallback = std::function<void(double bid, double ask,
                                           double bid_volume, double ask_volume)>;
 
-// Statusmeldingen voor een UI (verbinden, geauthenticeerd, fouten, reconnect, ...)
+// Status messages for a UI (connecting, authenticated, errors, reconnect, ...)
 using StatusCallback = std::function<void(const std::string&)>;
 
 class AlpacaWebSocket {
@@ -18,16 +18,16 @@ public:
                      std::string api_secret,
                      std::vector<std::string> symbols);
 
-    // Wordt aangeroepen telkens er een nieuwe quote binnenkomt
+    // Called whenever a new quote arrives
     void setQuoteCallback(QuoteCallback cb);
 
-    // Wordt aangeroepen bij statusveranderingen (verbinden, fouten, ...)
+    // Called on status changes (connecting, errors, ...)
     void setStatusCallback(StatusCallback cb);
 
-    // Blokkerende call: opent verbinding, auth, subscribe, en verwerkt events
+    // Blocking call: opens connection, auth, subscribe, and processes events
     void run();
 
-    // Vraagt een nette shutdown aan; run() stopt binnenkort (max. een paar seconden).
+    // Requests a clean shutdown; run() stops shortly after (max a few seconds).
     void stop();
 
 private:

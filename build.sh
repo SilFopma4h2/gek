@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -e
 
-# Gebruik:  ./build.sh            -> bouwt en start de console-versie (gek)
-#           ./build.sh --gui      -> bouwt en start de GUI-versie (gek_gui)
+# Usage:  ./build.sh            -> builds and starts the console version (flow)
+#         ./build.sh --gui      -> builds and starts the GUI version (flow_gui)
 GUI=""
 for arg in "$@"; do
     if [ "$arg" = "--gui" ]; then
@@ -10,16 +10,11 @@ for arg in "$@"; do
     fi
 done
 
-cd ~
-cd gek
-
 cmake -S . -B build
-
-cd build
-cmake --build .
+cmake --build build
 
 if [ -n "$GUI" ]; then
-    ./gek_gui
+    ./build/flow_gui
 else
-    ./gek
+    ./build/flow
 fi

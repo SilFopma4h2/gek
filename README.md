@@ -1,54 +1,55 @@
-# gek
+# Flow++
 
-De naam gek komt van dat het makkelijker te zoeken is met cd gek in plaats van een lange naam.
+A C++ trading bot that processes real-time quotes from Alpaca's websocket feed, computes a buy/sell signal from order-book imbalance, and optionally places orders automatically via the Alpaca REST API.
 
-Een C++ trading bot die real-time quotes van Alpaca's websocket-feed verwerkt, een koop/verkoop-signaal berekent op basis van orderboek-onbalans, en (optioneel) automatisch orders plaatst via de Alpaca REST API.
+The name *Flow++* references the flow of market data and the C++ language.
 
-## Overzicht
+## Overview
 
-`gek` verbindt met de Alpaca IEX quote-stream voor een opgegeven symbool (standaard `SPY`), berekent per binnenkomende quote een **weighted mid price** en volume-ratio tussen bid en ask, en bepaalt op basis daarvan een signaal: `BUY`, `SELL` of `NEUTRAAL`. De signalen worden over een venster van **5 minuten** verzameld; het meerderheidssignaal binnen dat venster beslist of er een (bracket) order wordt geplaatst.
+Flow++ connects to the Alpaca IEX quote stream for a configurable symbol (default `SPY`), computes a **weighted mid price** and a volume ratio between bid and ask for every incoming quote, and derives a signal: `BUY`, `SELL` or `NEUTRAL`. Signals are collected over a **5-minute** window; the majority signal within that window decides whether a (bracket) order is placed.
 
-## Architectuur
+## Architecture
 
-| Bestand | Verantwoordelijkheid |
+| File | Responsibility |
 |---|---|
-| `main.cpp` | Entry point (console-versie), orderbook-opslag, signaallogica, threading |
-| `gui.cpp` | Entry point GUI-versie (`gek_gui`); bevat alle logica uit `main.cpp` in een Dear ImGui interface |
-| `websocket.h` / `websocket.cpp` | Verbinding, authenticatie en subscriptie op Alpaca's websocket (Boost.Beast + OpenSSL) |
-| `order.h` / `order.cpp` | Order plaatsen via Alpaca REST API (libcurl) |
+| `main.cpp` | Entry point (console version), order-book storage, signal logic, threading |
+| `gui.cpp` | Entry point for the GUI version (`flow_gui`); contains all logic from `main.cpp` in a Dear ImGui interface |
+| `websocket.h` / `websocket.cpp` | Connection, authentication and subscription to Alpaca's websocket (Boost.Beast + OpenSSL) |
+| `order.h` / `order.cpp` | Order placement via the Alpaca REST API (libcurl) |
 | `imgui/` | Vendored Dear ImGui (GLFW + OpenGL backends) |
-| `CMakeLists.txt` | Build-configuratie |
-| `build.sh` | Build- en run-script (console-versie) |
+| `CMakeLists.txt` | Build configuration |
+| `build.sh` | Build and run script |
 
 ### Dataflow
 
-1. `client.run()` draait in een aparte thread en opent een websocket-verbinding met `stream.data.alpaca.markets`.
-2. Bij elke binnenkomende quote (`type == "q"`) wordt de callback aangeroepen, die bid/ask prijs en volume opslaat in `Apple_Book_Data` (een `std::deque`, gelimiteerd tot 500 entries).
-3. De hoofdthread wordt via een `condition_variable` gewekt zodra nieuwe data beschikbaar is, en roept `evaluateSignal()` aan op de laatste quote.
-4. Iedere **5 minuten** (aangegeven door `DECISION_INTERVAL_SECONDS` in `main.cpp`) wordt de meerderheid van de verzamelde signalen bepaald met `majoritySignal()`. Bij een `BUY`/`SELL`-meerderheid wordt via `order()` een bracket order geplaatst; daarna worden signaalbuffer en spread-som gereset.
+1. `client.run()` runs on a separate thread and opens a websocket connection to `stream.data.alpaca.markets`.
+2. For every incoming quote (`type == "q"`) the callback is invoked, which stores the bid/ask price and volume in `Apple_Book_Data` (a `std::deque`, limited to 500 entries).
+3. The main thread is woken via a `condition_variable` as soon as new data is available, and calls `evaluateSignal()` on the latest quote.
+4. Every **5 minutes** (set by `DECISION_INTERVAL_SECONDS` in `main.cpp`) the majority of the collected signals is determined with `majoritySignal()`. On a `BUY`/`SELL` majority a bracket order is placed via `order()`; afterwards the signal buffer and spread sum are reset.
 
-### Signaallogica
+### Signal logic
 
-Voor elke quote wordt berekend:
+For every quote the following is computed:
 
 - **Mid price**: `(bid + ask) / 2`
-- **Weighted mid price (wmid)**: prijs gewogen naar volume aan de tegenoverliggende kant
-- **Ratio**: aandeel van het bid-volume in het totale volume
+- **Weighted mid price (wmid)**: price weighted towards the volume on the opposite side
+- **Ratio**: share of the bid volume in the total volume
 
-Regels:
-- `wmid > mid` én `ratio > 0.60` → **BUY** (kopersdruk dominant)
-- `wmid < mid` én `ratio < 0.40` → **SELL** (verkopersdruk dominant)
-- anders → **NEUTRAAL**
+Rules:
 
-### Beslissing (elke 5 minuten)
+- `wmid > mid` and `ratio > 0.60` → **BUY** (buyer pressure dominant)
+- `wmid < mid` and `ratio < 0.40` → **SELL** (seller pressure dominant)
+- otherwise → **NEUTRAL**
 
-Per binnenkomende quote wordt een signaal aan `signalBuffer` toegevoegd. Zodra het tijdvenster van **5 minuten** (`DECISION_INTERVAL_SECONDS`) verstreken is:
+### Decision (every 5 minutes)
 
-1. `majoritySignal()` telt welk signaal het vaakst voorkwam → de beslissing.
-2. Bij `BUY` of `SELL` plaatst `order(decision, tickCount)` een limit-bracket order op de actuele mid-price, met TP/SL gebaseerd op de **gemiddelde spread** over het venster (volatiliteitsmaat).
-3. Buffers en spread-som worden gereset voor het volgende venster.
+A signal is added to `signalBuffer` for each incoming quote. Once the **5-minute** window (`DECISION_INTERVAL_SECONDS`) has elapsed:
 
-Omdat het om een tijdvenster gaat, varieert het aantal ticks per venster; de gemiddelde spread wordt daarom door het werkelijk aantal verwerkte ticks gedeeld.
+1. `majoritySignal()` counts which signal occurred most often → the decision.
+2. On `BUY` or `SELL`, `order(decision, tickCount)` places a limit-bracket order at the current mid price, with TP/SL based on the **average spread** over the window (a volatility measure).
+3. Buffers and the spread sum are reset for the next window.
+
+Because this is a time window, the number of ticks per window varies; the average spread is therefore divided by the actual number of processed ticks.
 
 ## Dependencies
 
@@ -60,62 +61,74 @@ Omdat het om een tijdvenster gaat, varieert het aantal ticks per venster; de gem
 - libcurl
 - Threads
 
+For the GUI (`flow_gui`) additionally:
+
+- GLFW 3 (via pkg-config)
+- OpenGL / Mesa
+
 ## Build & Run
 
 ```bash
-./build.sh            # bouwt en start de console-versie (gek)
-./build.sh --gui      # bouwt en start de GUI-versie (gek_gui)
+./build.sh            # builds and starts the console version (flow)
+./build.sh --gui      # builds and starts the GUI version (flow_gui)
 ```
 
 `build.sh`:
-1. Zet de Alpaca API-credentials als environment variables
-2. Configureert en bouwt het project met CMake
-3. Start de `gek`-executable, of `gek_gui` bij `--gui`
 
-Handmatig:
+1. Reads the Alpaca API credentials from the environment
+2. Configures and builds the project with CMake
+3. Starts the `flow` executable, or `flow_gui` with `--gui`
+
+Manual build:
 
 ```bash
 cmake -S . -B build
 cmake --build build
-./build/gek            # console-versie
-./build/gek_gui        # GUI-versie
+./build/flow            # console version
+./build/flow_gui        # GUI version
 ```
 
-## GUI (`gek_gui`)
+## GUI (`flow_gui`)
 
-Een Dear ImGui + GLFW + OpenGL interface met alle functionaliteit uit `main.cpp`:
+A Dear ImGui + GLFW + OpenGL interface with all functionality from `main.cpp`:
 
-- **Verbinding & Instellingen**: symbool (aanpasbaar), Connect/Disconnect, API-key status, `orderyes`-toggle, TP/SL multipliers en het beslissingsinterval (minuten).
-- **Markt Data**: live bid/ask/spread/mid/weighted mid/bid-ratio, volume-balk en een mid-price-sparkline.
-- **Signalen**: huidig signaal, tellingen per signaal in het lopende venster, aftelklok tot de volgende beslissing en een "Beslis nu"-knop.
-- **Beslissingen**: tabel met recente beslissingen (tijd, meerderheid, entry/TP/SL, order-status).
-- **Log**: scrollende, gekleurde log (feed-status, quotes, beslissingen, orderresultaten) met autoscroll en een "log elke quote"-toggle.
+- **Connection & Settings**: configurable symbol, Connect/Disconnect, API-key status, order toggle, TP/SL multipliers and the decision interval (minutes).
+- **Market Data**: live bid/ask/spread/mid/weighted mid/bid-ratio, volume bar and a mid-price sparkline.
+- **Signals**: current signal, per-signal counts in the running window, countdown to the next decision and a "Decide now" button.
+- **Decisions**: table of recent decisions (time, majority, entry/TP/SL, order status).
+- **Log**: scrolling, colored log (feed status, quotes, decisions, order results) with autoscroll and a "log every quote" toggle.
 
-De beslissing wordt, net als in `main.cpp`, genomen zodra het interval (standaard 5 minuten) is verstreken; het meerderheidssignaal bepaalt dan of er een bracket order wordt geplaatst. Orders lopen op een aparte thread zodat de UI responsief blijft.
+Like `main.cpp`, the decision is made as soon as the interval (default 5 minutes) has elapsed; the majority signal then determines whether a bracket order is placed. Orders run on a separate thread so the UI stays responsive.
 
 ## WSL2
 
-`gek_gui` is **WSL2-proof**: hij draait op WSLg (X11/Wayland) via GLFW + OpenGL (Mesa). Als er geen display beschikbaar is (geen WSLg / geen X-server), geeft hij een duidelijke foutmelding en sluit netjes af. Vereisten:
+`flow_gui` is **WSL2-proof**: it runs on WSLg (X11/Wayland) via GLFW + OpenGL (Mesa). If no display is available (no WSLg / no X server) it prints a clear error message and exits cleanly. Requirements:
 
 ```bash
 sudo apt install libglfw3-dev libgl1-mesa-dev libcurl4-openssl-dev libssl-dev \
      libboost-system-dev nlohmann-json3-dev
 ```
 
-Run de GUI vanuit een interactieve WSL-shell (zodat `DISPLAY` is gezet), start WSLg of een X-server, en voer `./build/gek_gui` uit.
+Run the GUI from an interactive WSL shell (so `DISPLAY` is set), start WSLg or an X server, and run `./build/flow_gui`.
 
-## Configuratie
+## Configuration
 
-- In de console-versie (`main.cpp`) staat het symbool hardcoded (`const std::string symbol = "SPY";`); in de GUI is dit via het paneel aanpasbaar.
-- De API endpoint in `order.cpp` wijst naar de **paper trading** omgeving van Alpaca (`paper-api.alpaca.markets`), dus orders worden niet met echt geld uitgevoerd.
+- In the console version (`main.cpp`) the symbol is hardcoded (`const std::string symbol = "SPY";`); in the GUI it can be changed via the panel.
+- The API endpoint in `order.cpp` points to Alpaca's **paper trading** environment (`paper-api.alpaca.markets`), so no real money is involved.
 
-## Bekende aandachtspunten
+## Credentials
 
-- **API keys**: staan niet hardcoded in `build.sh` — die worden via `ALPACA_API_KEY` / `ALPACA_API_SECRET` environment variables ingelezen in `main.cpp` en `order.cpp`. Zorg dat deze buiten versiebeheer blijven (bv. via je shell-profiel of een niet-gecommit `.env`).
-- **`order()`-functie**: plaatst correct `"buy"` bij een BUY-signaal en `"sell"` bij een SELL-signaal.
-- **Orderfrequentie**: `order()` wordt maximaal **1× per 5 minuten** aangeroepen (het tijdvenster). Als het meerderheidssignaal `NEUTRAAL` is, wordt er geen order geplaatst.
-- **Geen positie-check**: er wordt niet gecontroleerd of er al open posities of orders openstaan. Als het BUY/SELL-signaal blijft domineren, kunnen er meerdere bracket orders naast elkaar ontstaan — overweeg een positie-check voordat je met echt geld live gaat.
+Set the following environment variables before running:
 
-## Taal
+```bash
+export ALPACA_API_KEY=your_api_key
+export ALPACA_API_SECRET=your_api_secret
+```
 
-Comments en logmeldingen zijn in het Nederlands; code en identifiers in het Engels.
+Flow++ reads these at runtime; they are never hardcoded. Keep them out of version control.
+
+## Known considerations
+
+- **No position check**: there is no check for existing open positions or orders. If the BUY/SELL signal keeps dominating, multiple bracket orders can build up. Consider adding a position check before going live with real money.
+- **Order frequency**: `order()` is called at most **once per 5 minutes** (the time window). If the majority signal is `NEUTRAL`, no order is placed.
+- **GUI state**: window layout is persisted in `flow_gui.ini` (generated at runtime, gitignored).

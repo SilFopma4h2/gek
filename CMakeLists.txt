@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(gek)
+project(Flow++)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -10,13 +10,13 @@ find_package(nlohmann_json REQUIRED)
 find_package(Threads REQUIRED)
 find_package(CURL REQUIRED)
 
-add_executable(gek main.cpp
+add_executable(flow main.cpp
         websocket.h
         websocket.cpp
         order.cpp
         order.h)
 
-target_link_libraries(gek PRIVATE
+target_link_libraries(flow PRIVATE
         Boost::system
         OpenSSL::SSL
         OpenSSL::Crypto
@@ -25,8 +25,8 @@ target_link_libraries(gek PRIVATE
         CURL::libcurl
 )
 
-# --- GUI (gek_gui): Dear ImGui + GLFW + OpenGL. Alleen als de deps aanwezig
-# zijn, zodat de console-build op systemen zonder GUI werkt. ----------------
+# --- GUI (flow_gui): Dear ImGui + GLFW + OpenGL. Only built when the deps are
+# present, so the console build works on systems without a GUI. ---------------
 find_package(PkgConfig QUIET)
 find_package(OpenGL QUIET)
 if(PkgConfig_FOUND)
@@ -43,16 +43,16 @@ if(GLFW_FOUND AND OpenGL_FOUND)
             imgui/backends/imgui_impl_opengl3.cpp
     )
 
-    add_executable(gek_gui gui.cpp
+    add_executable(flow_gui gui.cpp
             websocket.h
             websocket.cpp
             order.cpp
             order.h
             ${IMGUI_SOURCES})
 
-    target_include_directories(gek_gui PRIVATE imgui imgui/backends)
+    target_include_directories(flow_gui PRIVATE imgui imgui/backends)
 
-    target_link_libraries(gek_gui PRIVATE
+    target_link_libraries(flow_gui PRIVATE
             Boost::system
             OpenSSL::SSL
             OpenSSL::Crypto
@@ -64,5 +64,5 @@ if(GLFW_FOUND AND OpenGL_FOUND)
             dl
     )
 else()
-    message(WARNING "GLFW/OpenGL niet gevonden; gek_gui wordt niet gebouwd.")
+    message(WARNING "GLFW/OpenGL not found; flow_gui will not be built.")
 endif()
