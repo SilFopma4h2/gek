@@ -1,14 +1,9 @@
-// gui.cpp
-//
-// GUI version of Flow++. Same logic as main.cpp:
-//   - OrderBook storage (deque, capped at 500)
-//   - evaluateSignal() (weighted mid + ratio -> BUY/SELL/NEUTRAL)
-//   - majoritySignal() over a time window (default 5 minutes)
-//   - order() via Alpaca REST, TP/SL from average spread
-//   - websocket feed via websocket.h/cpp (Alpaca IEX quotes)
-//
-// Runs on WSLg (X11/Wayland) via GLFW + OpenGL; prints a clear
-// message if there's no display around.
+
+
+
+
+
+
 
 #include <algorithm>
 #include <atomic>
@@ -38,9 +33,9 @@
 #include "order.h"
 #include "experts.h"
 
-// ---------------------------------------------------------------------------
-// palette + theme
-// ---------------------------------------------------------------------------
+
+
+
 namespace col {
 const ImU32 bg       = IM_COL32(20, 22, 26, 255);
 const ImU32 panel    = IM_COL32(24, 27, 32, 255);
@@ -125,24 +120,25 @@ static void applyTheme() {
     c[ImGuiCol_TextSelectedBg]       = ImVec4(0.247f, 0.447f, 0.702f, 0.40f);
 }
 
-// ---------------------------------------------------------------------------
-// config (same constants as main.cpp, editable here)
-// ---------------------------------------------------------------------------
+
+
+
 struct Settings {
     char symbol[16] = "SPY";
-    bool orderEnabled = false;          // = orderyes in main.cpp
-    float tpMult = 3.0f;                // = TP_SPREAD_MULTIPLIER
-    float slMult = 1.5f;                // = SL_SPREAD_MULTIPLIER
-    int intervalMinutes = 5;            // = DECISION_INTERVAL_SECONDS / 60
+    bool orderEnabled = false;          
+    float tpMult = 3.0f;                
+    float slMult = 1.5f;                
+    int intervalMinutes = 5;            
     float ofiThresh = (float)OFI_THRESHOLD;
     float driftThresh = (float)DRIFT_THRESHOLD;
     float absThresh = (float)ABSORPTION_THRESHOLD;
+    char timezone[48] = "Europe/Amsterdam";
 };
 static Settings g_settings;
 
-// ---------------------------------------------------------------------------
-// log (locked; feed + order threads write here)
-// ---------------------------------------------------------------------------
+
+
+
 struct LogEntry {
     std::string text;
     ImU32 color;
@@ -182,174 +178,117 @@ static ImU32 signalColor(const std::string& s) {
 
 static ImVec4 colF(ImU32 c) { return ImGui::ColorConvertU32ToFloat4(c); }
 
-// ---------------------------------------------------------------------------
-// market clock (US equities: 09:30-16:00 ET, Mon-Fri)
-// ---------------------------------------------------------------------------
-static int daysFromCivil(int y, int m, int d) {
-    y -= m <= 2;
-    const int era = (y >= 0 ? y : y - 399) / 400;
-    const unsigned yoe = static_cast<unsigned>(y - era * 400);
-    const unsigned doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
-    const unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    return era * 146097 + static_cast<int>(doe) - 719468;
-}
 
-static void civilFromDays(int z, int& y, int& m, int& d) {
-    z += 719468;
-    const int era = (z >= 0 ? z : z - 146096) / 146097;
-    const unsigned doe = static_cast<unsigned>(z - era * 146097);
-    const unsigned yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    const int yy = static_cast<int>(yoe) + era * 400;
-    const unsigned doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    const unsigned mp = (5 * doy + 2) / 153;
-    d = static_cast<int>(doy - (153 * mp + 2) / 5 + 1);
-    m = static_cast<int>(mp + (mp < 10 ? 3 : -9));
-    y = yy + (m <= 2);
-}
 
-// day of week, 0 = Sunday (1970-01-01 was a Thursday)
-static int dayOfWeek(int y, int m, int d) {
-    return ((daysFromCivil(y, m, d) % 7) + 7 + 4) % 7;
-}
 
-static long long composeEpoch(int y, int m, int d, int h, int mi) {
-    return (long long)daysFromCivil(y, m, d) * 86400LL + h * 3600LL + mi * 60LL;
-}
+static constexpr int MARKET_OPEN_MIN  = 9 * 60 + 30;
+static constexpr int MARKET_CLOSE_MIN = 16 * 60;
 
-static void decomposeEpoch(long long epoch, int& y, int& m, int& d,
-                           int& h, int& mi) {
-    long long days = epoch / 86400;
-    long long rem = epoch % 86400;
-    if (rem < 0) { rem += 86400; --days; }
-    civilFromDays((int)days, y, m, d);
-    h = (int)(rem / 3600);
-    mi = (int)((rem % 3600) / 60);
+static std::string formatHm(int minutes) {
+    char buf[16];
+    snprintf(buf, sizeof(buf), "%02d:%02d", minutes / 60, minutes % 60);
+    return buf;
 }
-
-// US Eastern DST: second Sunday of March -> first Sunday of November
-static int dstStartDay(int y) {
-    int w = dayOfWeek(y, 3, 1);
-    return 1 + ((7 - w) % 7) + 7;   // 2nd Sunday of March
-}
-static int dstEndDay(int y) {
-    int w = dayOfWeek(y, 11, 1);
-    return 1 + ((7 - w) % 7);       // 1st Sunday of November
-}
-static bool isDstEastern(int y, int m, int d) {
-    if (m > 3 && m < 11) return true;
-    if (m == 3) return d >= dstStartDay(y);
-    if (m == 11) return d < dstEndDay(y);
-    return false;
-}
-
-// minutes to add to local civil time to get UTC (positive east of Greenwich)
-static int localOffsetToUtcMinutes() {
-    std::time_t t = std::time(nullptr);
-    std::tm lt{};
-    localtime_r(&t, &lt);
-    long long asUtc = composeEpoch(lt.tm_year + 1900, lt.tm_mon + 1,
-                                   lt.tm_mday, lt.tm_hour, lt.tm_min);
-    return (int)((asUtc - (long long)t) / 60);
-}
-
-// current time in US Eastern (minutes since midnight + weekday, 0 = Sunday)
-static void easternNow(long long now, int& y, int& m, int& d, int& dow,
-                       int& minutes) {
-    int ih = 0, im = 0;
-    int off = -300;                       // EST first guess
-    decomposeEpoch(now + off * 60, y, m, d, ih, im);
-    if (isDstEastern(y, m, d)) off = -240; // EDT
-    decomposeEpoch(now + off * 60, y, m, d, ih, im);
-    dow = dayOfWeek(y, m, d);
-    long long rem = (now + off * 60) % 86400;
-    if (rem < 0) rem += 86400;
-    minutes = (int)(rem / 60);
-}
-
-static constexpr int MARKET_OPEN_MIN  = 9 * 60 + 30;   // 09:30 ET
-static constexpr int MARKET_CLOSE_MIN = 16 * 60;       // 16:00 ET
-
-static long long nextOpenEpoch(long long now) {
-    int y, m, d, dow, minutes;
-    easternNow(now, y, m, d, dow, minutes);
-    const bool open = (dow >= 1 && dow <= 5) &&
-                      minutes >= MARKET_OPEN_MIN && minutes < MARKET_CLOSE_MIN;
-    long long cand = composeEpoch(y, m, d, 9, 30);
-    if (cand <= now) cand += 86400;       // already past today's open
-    int cy, cm, cd;
-    for (;;) {
-        int ih = 0, im = 0;
-        decomposeEpoch(cand, cy, cm, cd, ih, im);
-        int wd = dayOfWeek(cy, cm, cd);
-        if (wd >= 1 && wd <= 5) break;
-        cand += 86400;
-    }
-    return cand;
-}
-
-struct MarketClock {
-    bool isOpen = false;
-    ImU32 statusColor = col::red;
-    std::string statusText;
-    std::string etTime;
-    std::string nextOpenText;
-    std::string countdownText;
-};
 
 static std::string formatCountdown(long long seconds) {
     long long h = seconds / 3600;
     long long m = (seconds % 3600) / 60;
-    std::ostringstream oss;
-    oss << h << "h " << std::setw(2) << std::setfill('0') << m << "m";
-    return oss.str();
+    char buf[40];
+    snprintf(buf, sizeof(buf), "%lldh %02lldm", h, m);
+    return buf;
 }
 
-static MarketClock marketClock() {
+static const char* dayShort(int dow) {
+    static const char* names[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
+    return names[dow];
+}
+
+static std::chrono::local_time<std::chrono::seconds>
+zToLocal(const std::chrono::time_zone* z, std::chrono::sys_seconds st) {
+    return std::chrono::zoned_time<std::chrono::seconds>(z, st).get_local_time();
+}
+
+static std::chrono::sys_seconds
+zToSys(const std::chrono::time_zone* z,
+       std::chrono::local_time<std::chrono::seconds> lt) {
+    return std::chrono::zoned_time<std::chrono::seconds>(z, lt).get_sys_time();
+}
+
+struct MarketClock {
+    bool valid = false;
+    bool isOpen = false;
+    ImU32 statusColor = col::red;
+    std::string statusText;
+    std::string etTime;
+    std::string zoneTime;
+    std::string nextOpenText;
+    std::string countdownText;
+};
+
+static MarketClock marketClock(const char* zone) {
     MarketClock c;
-    long long now = (long long)std::time(nullptr);
+    try {
+        using namespace std::chrono;
+        const time_zone* ny = locate_zone("America/New_York");
+        const time_zone* disp = locate_zone(zone);
+        auto now = floor<seconds>(system_clock::now());
 
-    int ey, em, ed, edow, emin;
-    easternNow(now, ey, em, ed, edow, emin);
-    std::ostringstream et;
-    et << std::setw(2) << std::setfill('0') << (emin / 60) << ":"
-       << std::setw(2) << std::setfill('0') << (emin % 60);
-    c.etTime = et.str();
+        auto nyLocal = zToLocal(ny, now);
+        auto nyDay = floor<days>(nyLocal);
+        int nyDow = (int)weekday{nyDay}.c_encoding();
+        int nyMin = (int)duration_cast<minutes>(nyLocal - nyDay).count();
 
-    c.isOpen = (edow >= 1 && edow <= 5) &&
-               emin >= MARKET_OPEN_MIN && emin < MARKET_CLOSE_MIN;
-    c.statusText = c.isOpen ? "OPEN" : "CLOSED";
-    c.statusColor = c.isOpen ? col::green : col::red;
+        c.isOpen = (nyDow >= 1 && nyDow <= 5) &&
+                   nyMin >= MARKET_OPEN_MIN && nyMin < MARKET_CLOSE_MIN;
+        c.statusText = c.isOpen ? "OPEN" : "CLOSED";
+        c.statusColor = c.isOpen ? col::green : col::red;
+        c.etTime = formatHm(nyMin);
 
-    long long next = nextOpenEpoch(now);
-    long long secs = std::max(0LL, next - now);
-    c.countdownText = "in " + formatCountdown(secs);
+        auto dispNow = zToLocal(disp, now);
+        auto dispNowDay = floor<days>(dispNow);
+        c.zoneTime = formatHm((int)duration_cast<minutes>(dispNow - dispNowDay).count());
 
-    int off = localOffsetToUtcMinutes();
-    int ly, lm, ld, lh, lmi;
-    decomposeEpoch(next + off * 60, ly, lm, ld, lh, lmi);
+        auto cand = zToSys(ny, local_time<seconds>(nyDay) + seconds(MARKET_OPEN_MIN * 60));
+        if (cand <= now) {
+            cand = zToSys(ny, local_time<seconds>(nyDay + days{1}) +
+                              seconds(MARKET_OPEN_MIN * 60));
+        }
+        for (;;) {
+            auto cLocal = zToLocal(ny, cand);
+            auto cDay = floor<days>(cLocal);
+            int wd = (int)weekday{cDay}.c_encoding();
+            if (wd >= 1 && wd <= 5) break;
+            cand = zToSys(ny, local_time<seconds>(cDay + days{1}) +
+                              seconds(MARKET_OPEN_MIN * 60));
+        }
 
-    static const char* dayNames[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
-    std::tm lt{};
-    std::time_t tnow = (std::time_t)now;
-    localtime_r(&tnow, &lt);
-    long long todayCivil = composeEpoch(lt.tm_year + 1900, lt.tm_mon + 1,
-                                        lt.tm_mday, 0, 0);
-    long long openCivil = composeEpoch(ly, lm, ld, 0, 0);
-    std::string dayLabel;
-    if (openCivil == todayCivil) dayLabel = "today";
-    else if (openCivil == todayCivil + 86400) dayLabel = "tomorrow";
-    else dayLabel = dayNames[dayOfWeek(ly, lm, ld)];
+        long long secs = std::max(0LL, (long long)(cand - now).count());
+        c.countdownText = "in " + formatCountdown(secs);
 
-    std::ostringstream nx;
-    nx << dayLabel << " " << std::setw(2) << std::setfill('0') << lh << ":"
-       << std::setw(2) << std::setfill('0') << lmi;
-    c.nextOpenText = nx.str();
+        auto nxLocal = zToLocal(disp, cand);
+        auto nxDay = floor<days>(nxLocal);
+        int nxDow = (int)weekday{nxDay}.c_encoding();
+        int nxMin = (int)duration_cast<minutes>(nxLocal - nxDay).count();
+
+        int diffDays = (int)((nxDay - dispNowDay).count());
+        std::string dayLabel;
+        if (diffDays == 0) dayLabel = "today";
+        else if (diffDays == 1) dayLabel = "tomorrow";
+        else dayLabel = dayShort(nxDow);
+
+        c.nextOpenText = dayLabel + " " + formatHm(nxMin);
+        c.valid = true;
+    } catch (...) {
+        c.valid = false;
+    }
     return c;
 }
 
-// ---------------------------------------------------------------------------
-// shared data: feed thread <-> gui thread
-// ---------------------------------------------------------------------------
+static std::string zoneShort(const std::string& z) {
+    size_t pos = z.rfind('/');
+    return pos == std::string::npos ? z : z.substr(pos + 1);
+}
+
 struct OrderBook {
     double bid;
     double ask;
@@ -358,9 +297,9 @@ struct OrderBook {
 };
 
 static std::mutex g_quoteMutex;
-static std::deque<OrderBook> g_quoteQueue;   // incoming quotes from the feed
-// bound the queue so a quote burst can never make memory/latency grow without
-// limit; we keep the freshest quotes and drop the oldest when full.
+static std::deque<OrderBook> g_quoteQueue;   
+
+
 static constexpr size_t QUOTE_QUEUE_CAP = 4096;
 
 static std::mutex g_statusMutex;
@@ -371,24 +310,26 @@ static std::mutex g_feedMutex;
 static std::shared_ptr<AlpacaWebSocket> g_client;
 static std::thread g_feedThread;
 
-// ---------------------------------------------------------------------------
-// trading state (gui thread only)
-// ---------------------------------------------------------------------------
-static std::deque<OrderBook> g_bookData;      // = symbolOrderBook (max 500)
+static std::vector<std::string> g_timezones;
 
-// running tallies for the current window, O(1) per quote.
-// replaces the old g_signalBuffer (a vector that grew unbounded all window
-// long and was recounted on every frame -> the "slow after 2 minutes" lag).
+
+
+
+static std::deque<OrderBook> g_bookData;      
+
+
+
+
 static int g_buyCount = 0;
 static int g_sellCount = 0;
 static int g_neuCount = 0;
 static int g_windowTicks = 0;
 
-static double g_spreadSum = 0.0;              // = spreadSum
-static double g_lastMid = 0.0;                // = lastMid
-static FlowState g_flow;                      // tallies for the new experts
+static double g_spreadSum = 0.0;              
+static double g_lastMid = 0.0;                
+static FlowState g_flow;                      
 static std::chrono::steady_clock::time_point g_windowStart =
-    std::chrono::steady_clock::now();         // = windowStart
+    std::chrono::steady_clock::now();         
 
 static void resetWindow() {
     g_buyCount = 0;
@@ -400,7 +341,7 @@ static void resetWindow() {
     g_windowStart = std::chrono::steady_clock::now();
 }
 
-static std::deque<double> g_bidHistory;       // line chart data
+static std::deque<double> g_bidHistory;       
 static std::deque<double> g_askHistory;
 static std::deque<double> g_midHistory;
 static std::deque<double> g_spreadHistory;
@@ -420,14 +361,14 @@ static constexpr size_t DECISION_CAP = 200;
 static std::string g_lastSignal = "NEUTRAL";
 static bool g_logEveryQuote = true;
 static bool g_autoScroll = true;
-// throttle per-quote log lines to at most one per second, so even at a high
-// quote rate the log stays useful and we don't do string work per quote
+
+
 static std::chrono::steady_clock::time_point g_lastQuoteLog =
     std::chrono::steady_clock::now();
 
-// ---------------------------------------------------------------------------
-// signal logic (ported from main.cpp)
-// ---------------------------------------------------------------------------
+
+
+
 struct QuoteMetrics {
     double spread;
     double mid;
@@ -441,7 +382,7 @@ static QuoteMetrics computeMetrics(const OrderBook& book) {
     m.spread = book.ask - book.bid;
     m.mid = (book.bid + book.ask) / 2.0;
 
-    // guard against div by zero
+    
     m.wmid = m.mid;
     m.ratio = 0.0;
     if ((book.bid_volume + book.ask_volume) > 0) {
@@ -450,19 +391,19 @@ static QuoteMetrics computeMetrics(const OrderBook& book) {
         m.ratio = (double)book.bid_volume / (book.bid_volume + book.ask_volume);
     }
 
-    // weighted mid vs mid decides the signal
+    
     if (m.wmid > m.mid && m.ratio > 0.60) {
-        m.signal = "BUY";       // buyer pressure
+        m.signal = "BUY";       
     } else if (m.wmid < m.mid && m.ratio < 0.40) {
-        m.signal = "SELL";      // seller pressure
+        m.signal = "SELL";      
     } else {
-        m.signal = "NEUTRAL";   // volumes balanced
+        m.signal = "NEUTRAL";   
     }
     return m;
 }
 
-// most common signal from the window tallies (same tie-break as the old
-// map-based version: BUY > NEUTRAL > SELL on a draw)
+
+
 static std::string majorityFromCounts(int buy, int sell, int neu) {
     int bestCount = std::max({buy, sell, neu});
     if (bestCount <= 0) return "NEUTRAL";
@@ -471,9 +412,9 @@ static std::string majorityFromCounts(int buy, int sell, int neu) {
     return "SELL";
 }
 
-// ---------------------------------------------------------------------------
-// order planning + placement (ported from main.cpp)
-// ---------------------------------------------------------------------------
+
+
+
 struct OrderPlan {
     std::string side;
     double entry = 0.0;
@@ -509,7 +450,7 @@ static void dispatchOrderAsync(const OrderPlan& p, const std::string& signal) {
             + " (avgSpread=" + formatPrice(g_spreadSum / std::max(1, g_windowTicks), 3) + ")",
             col::green);
 
-    // fire the order on a worker thread so the ui stays responsive
+    
     std::string symbol(g_settings.symbol);
     std::string side = p.side;
     double entry = p.entry, tp = p.tp, sl = p.sl;
@@ -518,14 +459,14 @@ static void dispatchOrderAsync(const OrderPlan& p, const std::string& signal) {
     }).detach();
 }
 
-// ---------------------------------------------------------------------------
-// decision (every intervalMinutes), same loop as main.cpp
-// ---------------------------------------------------------------------------
+
+
+
 static void runDecision() {
     int buy = g_buyCount, sell = g_sellCount, neu = g_neuCount;
     int ticks = g_windowTicks;
 
-    // four experts each give one vote for this window
+    
     const std::string baseStr = majorityFromCounts(buy, sell, neu);
     const ExpertSignal baseVote = baseStr == "BUY"  ? ExpertSignal::BUY
                                 : baseStr == "SELL" ? ExpertSignal::SELL
@@ -574,11 +515,11 @@ static void runDecision() {
     g_decisions.push_front(rec);
     if (g_decisions.size() > DECISION_CAP) g_decisions.pop_back();
 
-    // fresh window for the next interval
+    
     resetWindow();
 }
 
-// decide as soon as the interval elapses, even with no fresh quotes
+
 static void runDecisionCheck() {
     auto now = std::chrono::steady_clock::now();
     int intervalSec = g_settings.intervalMinutes * 60;
@@ -588,9 +529,9 @@ static void runDecisionCheck() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// feed on/off (websocket on its own thread)
-// ---------------------------------------------------------------------------
+
+
+
 static bool feedIsRunning() {
     std::lock_guard<std::mutex> lock(g_feedMutex);
     return g_feedThread.joinable();
@@ -664,9 +605,9 @@ static void stopFeed() {
     logLine("Feed stopped.", col::textDim);
 }
 
-// ---------------------------------------------------------------------------
-// drain incoming quotes (gui thread)
-// ---------------------------------------------------------------------------
+
+
+
 static void processQuotes() {
     std::deque<OrderBook> batch;
     {
@@ -675,7 +616,7 @@ static void processQuotes() {
     }
 
     for (const auto& q : batch) {
-        // orderbook storage, capped at 500 (same as main.cpp)
+        
         g_bookData.push_back(q);
         if (g_bookData.size() > 500) g_bookData.pop_front();
 
@@ -714,9 +655,9 @@ static void processQuotes() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// layout: fixed grid, windows still draggable/resizable
-// ---------------------------------------------------------------------------
+
+
+
 struct Layout {
     ImVec2 connPos, connSz;
     ImVec2 marketPos, marketSz;
@@ -768,8 +709,8 @@ static ImVec4 connectedColor(bool running) {
     return ImVec4(0.545f, 0.580f, 0.620f, 1.0f);
 }
 
-// force the grid once on startup so old flow_gui.ini
-// positions don't overlap the windows
+
+
 static bool g_forceLayout = true;
 
 static void applyPanelPlacement(const ImVec2& pos, const ImVec2& sz) {
@@ -788,9 +729,9 @@ static void centerHint(const char* text) {
 
 static ImFont* g_bigFont = nullptr;
 
-// ---------------------------------------------------------------------------
-// menu bar
-// ---------------------------------------------------------------------------
+
+
+
 static void drawMenuBar() {
     if (ImGui::BeginMainMenuBar()) {
         ImGui::TextColored(ImVec4(0.345f, 0.651f, 1.0f, 1.0f), "Flow++");
@@ -834,9 +775,9 @@ static void drawMenuBar() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// connection & settings
-// ---------------------------------------------------------------------------
+
+
+
 static void drawConnectionPanel() {
     Layout L = layout();
     applyPanelPlacement(L.connPos, L.connSz);
@@ -903,9 +844,9 @@ static void drawConnectionPanel() {
     ImGui::End();
 }
 
-// ---------------------------------------------------------------------------
-// ticker chart (custom draw)
-// ---------------------------------------------------------------------------
+
+
+
 static void drawChartPanel() {
     Layout L = layout();
     applyPanelPlacement(L.chartPos, L.chartSz);
@@ -1009,13 +950,37 @@ static void drawChartPanel() {
     ImGui::End();
 }
 
-// ---------------------------------------------------------------------------
-// market data
-// ---------------------------------------------------------------------------
+
+
+
 static void drawMarketPanel() {
     Layout L = layout();
     applyPanelPlacement(L.marketPos, L.marketSz);
     ImGui::Begin("Market Data");
+
+    ImGui::SeparatorText("Market hours");
+    int tzIdx = 0;
+    for (size_t i = 0; i < g_timezones.size(); ++i)
+        if (g_timezones[i] == g_settings.timezone) { tzIdx = (int)i; break; }
+    std::vector<const char*> tzNames;
+    tzNames.reserve(g_timezones.size());
+    for (const auto& z : g_timezones) tzNames.push_back(z.c_str());
+    if (ImGui::Combo("Time zone", &tzIdx, tzNames.data(), (int)tzNames.size()))
+        snprintf(g_settings.timezone, sizeof(g_settings.timezone), "%s", tzNames[tzIdx]);
+
+    MarketClock mc = marketClock(g_settings.timezone);
+    if (mc.valid) {
+        ImGui::Text("Status"); ImGui::SameLine();
+        ImGui::TextColored(colF(mc.statusColor), "%s", mc.statusText.c_str());
+        ImGui::Text("New York"); ImGui::SameLine();
+        ImGui::Text("%s ET", mc.etTime.c_str());
+        ImGui::Text("%s", zoneShort(g_settings.timezone).c_str()); ImGui::SameLine();
+        ImGui::Text("%s", mc.zoneTime.c_str());
+        ImGui::Text("Next open"); ImGui::SameLine();
+        ImGui::Text("%s (%s)", mc.nextOpenText.c_str(), mc.countdownText.c_str());
+    } else {
+        ImGui::TextColored(colF(col::red), "time zone data unavailable");
+    }
 
     if (g_bookData.empty()) {
         centerHint("Start the feed to see live data.");
@@ -1078,21 +1043,9 @@ static void drawMarketPanel() {
                          0, nullptr, lo, hi, ImVec2(-1, 60));
     }
 
-    ImGui::SeparatorText("Market hours");
-    MarketClock mc = marketClock();
-    ImGui::Text("Status"); ImGui::SameLine();
-    ImGui::TextColored(colF(mc.statusColor), "%s", mc.statusText.c_str());
-    ImGui::Text("New York"); ImGui::SameLine();
-    ImGui::Text("%s ET", mc.etTime.c_str());
-    ImGui::Text("Next open"); ImGui::SameLine();
-    ImGui::Text("%s (%s)", mc.nextOpenText.c_str(), mc.countdownText.c_str());
-
     ImGui::End();
 }
 
-// ---------------------------------------------------------------------------
-// signals
-// ---------------------------------------------------------------------------
 static void drawSignalPanel() {
     Layout L = layout();
     applyPanelPlacement(L.signalsPos, L.signalsSz);
@@ -1113,7 +1066,7 @@ static void drawSignalPanel() {
     ImGui::TextColored(colF(col::red),   "SELL    %d", sell);
     ImGui::TextColored(colF(col::yellow), "NEUTRAL %d", neu);
 
-    // colored bar chart
+    
     ImDrawList* dl = ImGui::GetWindowDrawList();
     ImVec2 a = ImGui::GetCursorScreenPos();
     float bw = ImGui::GetContentRegionAvail().x;
@@ -1172,9 +1125,9 @@ static void drawSignalPanel() {
     ImGui::End();
 }
 
-// ---------------------------------------------------------------------------
-// decisions
-// ---------------------------------------------------------------------------
+
+
+
 static void drawDecisionPanel() {
     Layout L = layout();
     applyPanelPlacement(L.decPos, L.decSz);
@@ -1224,9 +1177,9 @@ static void drawDecisionPanel() {
     ImGui::End();
 }
 
-// ---------------------------------------------------------------------------
-// log
-// ---------------------------------------------------------------------------
+
+
+
 static void drawLogPanel() {
     Layout L = layout();
     applyPanelPlacement(L.logPos, L.logSz);
@@ -1263,9 +1216,9 @@ static void drawLogPanel() {
     ImGui::End();
 }
 
-// ---------------------------------------------------------------------------
-// wsl2-safe window setup
-// ---------------------------------------------------------------------------
+
+
+
 static void glfwErrorCallback(int code, const char* desc) {
     std::cerr << "GLFW error (" << code << "): " << (desc ? desc : "?") << "\n";
 }
@@ -1284,8 +1237,8 @@ int main() {
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
 
-    // normal window with titlebar (close/minimize), then maximized to fill
-    // the screen so it still feels fullscreen
+    
+    
     GLFWwindow* window = glfwCreateWindow(1600, 1000, "Flow++ - Alpaca trading GUI",
                                           nullptr, nullptr);
     if (!window) {
@@ -1310,6 +1263,18 @@ int main() {
 
     applyTheme();
 
+    g_timezones = {
+        "America/New_York", "America/Chicago", "America/Denver", "America/Los_Angeles",
+        "Europe/London", "Europe/Amsterdam", "Europe/Berlin", "Europe/Paris",
+        "Europe/Madrid", "Europe/Rome", "Asia/Tokyo", "Australia/Sydney"
+    };
+    try {
+        std::string sys(std::chrono::current_zone()->name());
+        if (std::find(g_timezones.begin(), g_timezones.end(), sys) == g_timezones.end())
+            g_timezones.insert(g_timezones.begin(), sys);
+        snprintf(g_settings.timezone, sizeof(g_settings.timezone), "%s", sys.c_str());
+    } catch (...) {}
+
     ImFontConfig cfg;
     cfg.SizePixels = 15.0f;
     io.Fonts->AddFontDefault(&cfg);
@@ -1320,7 +1285,7 @@ int main() {
     ImGui_ImplGlfw_InitForOpenGL(window, true);
     ImGui_ImplOpenGL3_Init("#version 330");
 
-    // route order results to the gui log instead of stdout
+    
     setOrderLogCallback([](const std::string& msg, bool isError) {
         logLine(msg, isError ? col::red : col::green);
     });
@@ -1328,7 +1293,7 @@ int main() {
     while (!glfwWindowShouldClose(window)) {
         glfwPollEvents();
 
-        // handy way to quit quickly
+        
         if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS)
             glfwSetWindowShouldClose(window, true);
 
