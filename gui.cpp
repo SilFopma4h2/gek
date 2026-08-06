@@ -183,6 +183,171 @@ static ImU32 signalColor(const std::string& s) {
 static ImVec4 colF(ImU32 c) { return ImGui::ColorConvertU32ToFloat4(c); }
 
 // ---------------------------------------------------------------------------
+// market clock (US equities: 09:30-16:00 ET, Mon-Fri)
+// ---------------------------------------------------------------------------
+static int daysFromCivil(int y, int m, int d) {
+    y -= m <= 2;
+    const int era = (y >= 0 ? y : y - 399) / 400;
+    const unsigned yoe = static_cast<unsigned>(y - era * 400);
+    const unsigned doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+    const unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return era * 146097 + static_cast<int>(doe) - 719468;
+}
+
+static void civilFromDays(int z, int& y, int& m, int& d) {
+    z += 719468;
+    const int era = (z >= 0 ? z : z - 146096) / 146097;
+    const unsigned doe = static_cast<unsigned>(z - era * 146097);
+    const unsigned yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    const int yy = static_cast<int>(yoe) + era * 400;
+    const unsigned doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    const unsigned mp = (5 * doy + 2) / 153;
+    d = static_cast<int>(doy - (153 * mp + 2) / 5 + 1);
+    m = static_cast<int>(mp + (mp < 10 ? 3 : -9));
+    y = yy + (m <= 2);
+}
+
+// day of week, 0 = Sunday (1970-01-01 was a Thursday)
+static int dayOfWeek(int y, int m, int d) {
+    return ((daysFromCivil(y, m, d) % 7) + 7 + 4) % 7;
+}
+
+static long long composeEpoch(int y, int m, int d, int h, int mi) {
+    return (long long)daysFromCivil(y, m, d) * 86400LL + h * 3600LL + mi * 60LL;
+}
+
+static void decomposeEpoch(long long epoch, int& y, int& m, int& d,
+                           int& h, int& mi) {
+    long long days = epoch / 86400;
+    long long rem = epoch % 86400;
+    if (rem < 0) { rem += 86400; --days; }
+    civilFromDays((int)days, y, m, d);
+    h = (int)(rem / 3600);
+    mi = (int)((rem % 3600) / 60);
+}
+
+// US Eastern DST: second Sunday of March -> first Sunday of November
+static int dstStartDay(int y) {
+    int w = dayOfWeek(y, 3, 1);
+    return 1 + ((7 - w) % 7) + 7;   // 2nd Sunday of March
+}
+static int dstEndDay(int y) {
+    int w = dayOfWeek(y, 11, 1);
+    return 1 + ((7 - w) % 7);       // 1st Sunday of November
+}
+static bool isDstEastern(int y, int m, int d) {
+    if (m > 3 && m < 11) return true;
+    if (m == 3) return d >= dstStartDay(y);
+    if (m == 11) return d < dstEndDay(y);
+    return false;
+}
+
+// minutes to add to local civil time to get UTC (positive east of Greenwich)
+static int localOffsetToUtcMinutes() {
+    std::time_t t = std::time(nullptr);
+    std::tm lt{};
+    localtime_r(&t, &lt);
+    long long asUtc = composeEpoch(lt.tm_year + 1900, lt.tm_mon + 1,
+                                   lt.tm_mday, lt.tm_hour, lt.tm_min);
+    return (int)((asUtc - (long long)t) / 60);
+}
+
+// current time in US Eastern (minutes since midnight + weekday, 0 = Sunday)
+static void easternNow(long long now, int& y, int& m, int& d, int& dow,
+                       int& minutes) {
+    int ih = 0, im = 0;
+    int off = -300;                       // EST first guess
+    decomposeEpoch(now + off * 60, y, m, d, ih, im);
+    if (isDstEastern(y, m, d)) off = -240; // EDT
+    decomposeEpoch(now + off * 60, y, m, d, ih, im);
+    dow = dayOfWeek(y, m, d);
+    long long rem = (now + off * 60) % 86400;
+    if (rem < 0) rem += 86400;
+    minutes = (int)(rem / 60);
+}
+
+static constexpr int MARKET_OPEN_MIN  = 9 * 60 + 30;   // 09:30 ET
+static constexpr int MARKET_CLOSE_MIN = 16 * 60;       // 16:00 ET
+
+static long long nextOpenEpoch(long long now) {
+    int y, m, d, dow, minutes;
+    easternNow(now, y, m, d, dow, minutes);
+    const bool open = (dow >= 1 && dow <= 5) &&
+                      minutes >= MARKET_OPEN_MIN && minutes < MARKET_CLOSE_MIN;
+    long long cand = composeEpoch(y, m, d, 9, 30);
+    if (cand <= now) cand += 86400;       // already past today's open
+    int cy, cm, cd;
+    for (;;) {
+        int ih = 0, im = 0;
+        decomposeEpoch(cand, cy, cm, cd, ih, im);
+        int wd = dayOfWeek(cy, cm, cd);
+        if (wd >= 1 && wd <= 5) break;
+        cand += 86400;
+    }
+    return cand;
+}
+
+struct MarketClock {
+    bool isOpen = false;
+    ImU32 statusColor = col::red;
+    std::string statusText;
+    std::string etTime;
+    std::string nextOpenText;
+    std::string countdownText;
+};
+
+static std::string formatCountdown(long long seconds) {
+    long long h = seconds / 3600;
+    long long m = (seconds % 3600) / 60;
+    std::ostringstream oss;
+    oss << h << "h " << std::setw(2) << std::setfill('0') << m << "m";
+    return oss.str();
+}
+
+static MarketClock marketClock() {
+    MarketClock c;
+    long long now = (long long)std::time(nullptr);
+
+    int ey, em, ed, edow, emin;
+    easternNow(now, ey, em, ed, edow, emin);
+    std::ostringstream et;
+    et << std::setw(2) << std::setfill('0') << (emin / 60) << ":"
+       << std::setw(2) << std::setfill('0') << (emin % 60);
+    c.etTime = et.str();
+
+    c.isOpen = (edow >= 1 && edow <= 5) &&
+               emin >= MARKET_OPEN_MIN && emin < MARKET_CLOSE_MIN;
+    c.statusText = c.isOpen ? "OPEN" : "CLOSED";
+    c.statusColor = c.isOpen ? col::green : col::red;
+
+    long long next = nextOpenEpoch(now);
+    long long secs = std::max(0LL, next - now);
+    c.countdownText = "in " + formatCountdown(secs);
+
+    int off = localOffsetToUtcMinutes();
+    int ly, lm, ld, lh, lmi;
+    decomposeEpoch(next + off * 60, ly, lm, ld, lh, lmi);
+
+    static const char* dayNames[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
+    std::tm lt{};
+    std::time_t tnow = (std::time_t)now;
+    localtime_r(&tnow, &lt);
+    long long todayCivil = composeEpoch(lt.tm_year + 1900, lt.tm_mon + 1,
+                                        lt.tm_mday, 0, 0);
+    long long openCivil = composeEpoch(ly, lm, ld, 0, 0);
+    std::string dayLabel;
+    if (openCivil == todayCivil) dayLabel = "today";
+    else if (openCivil == todayCivil + 86400) dayLabel = "tomorrow";
+    else dayLabel = dayNames[dayOfWeek(ly, lm, ld)];
+
+    std::ostringstream nx;
+    nx << dayLabel << " " << std::setw(2) << std::setfill('0') << lh << ":"
+       << std::setw(2) << std::setfill('0') << lmi;
+    c.nextOpenText = nx.str();
+    return c;
+}
+
+// ---------------------------------------------------------------------------
 // shared data: feed thread <-> gui thread
 // ---------------------------------------------------------------------------
 struct OrderBook {
@@ -912,6 +1077,15 @@ static void drawMarketPanel() {
         ImGui::PlotLines("##mid", mids.data(), (int)mids.size(),
                          0, nullptr, lo, hi, ImVec2(-1, 60));
     }
+
+    ImGui::SeparatorText("Market hours");
+    MarketClock mc = marketClock();
+    ImGui::Text("Status"); ImGui::SameLine();
+    ImGui::TextColored(colF(mc.statusColor), "%s", mc.statusText.c_str());
+    ImGui::Text("New York"); ImGui::SameLine();
+    ImGui::Text("%s ET", mc.etTime.c_str());
+    ImGui::Text("Next open"); ImGui::SameLine();
+    ImGui::Text("%s (%s)", mc.nextOpenText.c_str(), mc.countdownText.c_str());
 
     ImGui::End();
 }
