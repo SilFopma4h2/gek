@@ -190,6 +190,9 @@ struct OrderBook {
 
 static std::mutex g_quoteMutex;
 static std::deque<OrderBook> g_quoteQueue;   // incoming quotes from the feed
+// bound the queue so a quote burst can never make memory/latency grow without
+// limit; we keep the freshest quotes and drop the oldest when full.
+static constexpr size_t QUOTE_QUEUE_CAP = 4096;
 
 static std::mutex g_statusMutex;
 static std::string g_statusText = "Not connected";
@@ -203,11 +206,28 @@ static std::thread g_feedThread;
 // trading state (gui thread only)
 // ---------------------------------------------------------------------------
 static std::deque<OrderBook> g_bookData;      // = symbolOrderBook (max 500)
-static std::vector<std::string> g_signalBuffer;
+
+// running tallies for the current window, O(1) per quote.
+// replaces the old g_signalBuffer (a vector that grew unbounded all window
+// long and was recounted on every frame -> the "slow after 2 minutes" lag).
+static int g_buyCount = 0;
+static int g_sellCount = 0;
+static int g_neuCount = 0;
+static int g_windowTicks = 0;
+
 static double g_spreadSum = 0.0;              // = spreadSum
 static double g_lastMid = 0.0;                // = lastMid
 static std::chrono::steady_clock::time_point g_windowStart =
     std::chrono::steady_clock::now();         // = windowStart
+
+static void resetWindow() {
+    g_buyCount = 0;
+    g_sellCount = 0;
+    g_neuCount = 0;
+    g_windowTicks = 0;
+    g_spreadSum = 0.0;
+    g_windowStart = std::chrono::steady_clock::now();
+}
 
 static std::deque<double> g_bidHistory;       // line chart data
 static std::deque<double> g_askHistory;
@@ -229,6 +249,10 @@ static constexpr size_t DECISION_CAP = 200;
 static std::string g_lastSignal = "NEUTRAL";
 static bool g_logEveryQuote = true;
 static bool g_autoScroll = true;
+// throttle per-quote log lines to at most one per second, so even at a high
+// quote rate the log stays useful and we don't do string work per quote
+static std::chrono::steady_clock::time_point g_lastQuoteLog =
+    std::chrono::steady_clock::now();
 
 // ---------------------------------------------------------------------------
 // signal logic (ported from main.cpp)
@@ -266,25 +290,14 @@ static QuoteMetrics computeMetrics(const OrderBook& book) {
     return m;
 }
 
-// most common signal in the buffer (same as main.cpp)
-static std::string majoritySignal(const std::vector<std::string>& signals,
-                                  int& buy, int& sell, int& neu) {
-    std::map<std::string, int> counts;
-    for (const auto& s : signals) counts[s]++;
-
-    buy = counts["BUY"];
-    sell = counts["SELL"];
-    neu = counts["NEUTRAL"];
-
-    std::string best = "NEUTRAL";
-    int bestCount = -1;
-    for (const auto& [sig, count] : counts) {
-        if (count > bestCount) {
-            bestCount = count;
-            best = sig;
-        }
-    }
-    return best;
+// most common signal from the window tallies (same tie-break as the old
+// map-based version: BUY > NEUTRAL > SELL on a draw)
+static std::string majorityFromCounts(int buy, int sell, int neu) {
+    int bestCount = std::max({buy, sell, neu});
+    if (bestCount <= 0) return "NEUTRAL";
+    if (buy == bestCount) return "BUY";
+    if (neu == bestCount) return "NEUTRAL";
+    return "SELL";
 }
 
 // ---------------------------------------------------------------------------
@@ -322,7 +335,7 @@ static OrderPlan makeOrderPlan(const std::string& signal, int tickCount) {
 static void dispatchOrderAsync(const OrderPlan& p, const std::string& signal) {
     logLine("-> " + signal + " limit+bracket: entry=" + formatPrice(p.entry)
             + " qty=1, TP=" + formatPrice(p.tp) + " SL=" + formatPrice(p.sl)
-            + " (avgSpread=" + formatPrice(g_spreadSum / std::max(1, (int)g_signalBuffer.size()), 3) + ")",
+            + " (avgSpread=" + formatPrice(g_spreadSum / std::max(1, g_windowTicks), 3) + ")",
             col::green);
 
     // fire the order on a worker thread so the ui stays responsive
@@ -338,11 +351,11 @@ static void dispatchOrderAsync(const OrderPlan& p, const std::string& signal) {
 // decision (every intervalMinutes), same loop as main.cpp
 // ---------------------------------------------------------------------------
 static void runDecision() {
-    int buy = 0, sell = 0, neu = 0;
-    int ticks = (int)g_signalBuffer.size();
+    int buy = g_buyCount, sell = g_sellCount, neu = g_neuCount;
+    int ticks = g_windowTicks;
     std::string decision = "NEUTRAL";
-    if (!g_signalBuffer.empty()) {
-        decision = majoritySignal(g_signalBuffer, buy, sell, neu);
+    if (ticks > 0) {
+        decision = majorityFromCounts(buy, sell, neu);
     }
 
     logLine("== Counting last " + std::to_string(ticks) + " signals: "
@@ -378,9 +391,7 @@ static void runDecision() {
     if (g_decisions.size() > DECISION_CAP) g_decisions.pop_back();
 
     // fresh window for the next interval
-    g_signalBuffer.clear();
-    g_spreadSum = 0.0;
-    g_windowStart = std::chrono::steady_clock::now();
+    resetWindow();
 }
 
 // decide as soon as the interval elapses, even with no fresh quotes
@@ -427,6 +438,7 @@ static void startFeed() {
     g_client->setQuoteCallback([](double bid, double ask,
                                   double bid_volume, double ask_volume) {
         std::lock_guard<std::mutex> lock(g_quoteMutex);
+        if (g_quoteQueue.size() >= QUOTE_QUEUE_CAP) g_quoteQueue.pop_front();
         g_quoteQueue.push_back(OrderBook{bid, ask, bid_volume, ask_volume});
     });
 
@@ -486,7 +498,10 @@ static void processQuotes() {
         QuoteMetrics m = computeMetrics(q);
         g_spreadSum += m.spread;
         g_lastMid = m.mid;
-        g_signalBuffer.push_back(m.signal);
+        g_windowTicks++;
+        if (m.signal == "BUY")      g_buyCount++;
+        else if (m.signal == "SELL") g_sellCount++;
+        else                        g_neuCount++;
         g_lastSignal = m.signal;
 
         g_midHistory.push_back(m.mid);
@@ -499,13 +514,17 @@ static void processQuotes() {
         if (g_askHistory.size() > CHART_CAP) g_askHistory.pop_front();
 
         if (g_logEveryQuote) {
-            logLine(nowStr() + " | Bid=" + formatPrice(q.bid)
+            auto now = std::chrono::steady_clock::now();
+            if (now - g_lastQuoteLog >= std::chrono::milliseconds(1000)) {
+                g_lastQuoteLog = now;
+                logLine(nowStr() + " | Bid=" + formatPrice(q.bid)
                     + " Ask=" + formatPrice(q.ask)
                     + " Spread=" + formatPrice(m.spread, 3)
                     + " Mid=" + formatPrice(m.mid)
                     + " Wmid=" + formatPrice(m.wmid)
                     + " Ratio=" + formatPrice(m.ratio, 3)
                     + " => " + m.signal, signalColor(m.signal));
+            }
         }
     }
 }
@@ -684,9 +703,7 @@ static void drawConnectionPanel() {
     ImGui::SeparatorText("Window");
     ImGui::DragInt("Interval (minutes)", &g_settings.intervalMinutes, 1, 1, 60);
     if (ImGui::Button("Reset window", ImVec2(-1, 0))) {
-        g_signalBuffer.clear();
-        g_spreadSum = 0.0;
-        g_windowStart = std::chrono::steady_clock::now();
+        resetWindow();
         logLine("Window manually reset.", col::textDim);
     }
 
@@ -879,19 +896,14 @@ static void drawSignalPanel() {
     applyPanelPlacement(L.signalsPos, L.signalsSz);
     ImGui::Begin("Signals");
 
-    int buy = 0, sell = 0, neu = 0;
-    for (const auto& s : g_signalBuffer) {
-        if (s == "BUY") buy++;
-        else if (s == "SELL") sell++;
-        else neu++;
-    }
+    int buy = g_buyCount, sell = g_sellCount, neu = g_neuCount;
 
     auto now = std::chrono::steady_clock::now();
     int intervalSec = g_settings.intervalMinutes * 60;
     auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - g_windowStart).count();
     int remaining = (int)std::max(0LL, (long long)intervalSec - elapsed);
 
-    ImGui::Text("Ticks: %zu", g_signalBuffer.size());
+    ImGui::Text("Ticks: %d", g_windowTicks);
     ImGui::Text("Decision in: %02d:%02d", remaining / 60, remaining % 60);
 
     ImGui::SeparatorText("Counts this window");
@@ -999,7 +1011,7 @@ static void drawLogPanel() {
     applyPanelPlacement(L.logPos, L.logSz);
     ImGui::Begin("Log");
 
-    ImGui::Checkbox("Log every quote", &g_logEveryQuote);
+    ImGui::Checkbox("Log quotes", &g_logEveryQuote);
     ImGui::SameLine();
     ImGui::Checkbox("Autoscroll", &g_autoScroll);
     ImGui::SameLine();

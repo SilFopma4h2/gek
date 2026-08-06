@@ -14,6 +14,7 @@
 #include <mutex>
 #include <condition_variable>
 #include <string>
+#include <memory>
 #include <curl/curl.h>
 
 namespace {
@@ -49,13 +50,20 @@ void postOrder(const nlohmann::json& body) {
 
     std::string bodyStr = body.dump();
 
-    CURL* curl = curl_easy_init();
+    // RAII wrappers around the libcurl C handles: the custom deleters make sure
+    // the handles are always freed, even if something in between throws. This
+    // replaces the old raw CURL*/curl_slist* + manual cleanup calls.
+    using CurlHandle = std::unique_ptr<CURL, decltype(&curl_easy_cleanup)>;
+    using SlistHandle = std::unique_ptr<curl_slist, decltype(&curl_slist_free_all)>;
+
+    CurlHandle curl(curl_easy_init(), curl_easy_cleanup);
     if (!curl) return;
 
-    struct curl_slist* headers = nullptr;
-    headers = curl_slist_append(headers, ("APCA-API-KEY-ID: " + std::string(key)).c_str());
-    headers = curl_slist_append(headers, ("APCA-API-SECRET-KEY: " + std::string(secret)).c_str());
-    headers = curl_slist_append(headers, "Content-Type: application/json");
+    curl_slist* slist = nullptr;
+    slist = curl_slist_append(slist, ("APCA-API-KEY-ID: " + std::string(key)).c_str());
+    slist = curl_slist_append(slist, ("APCA-API-SECRET-KEY: " + std::string(secret)).c_str());
+    slist = curl_slist_append(slist, "Content-Type: application/json");
+    SlistHandle headers(slist, curl_slist_free_all);
 
     // capture the response body so we can log errors
     std::string responseBuffer;
@@ -65,15 +73,15 @@ void postOrder(const nlohmann::json& body) {
         return size * nmemb;
     };
 
-    curl_easy_setopt(curl, CURLOPT_URL, "https://paper-api.alpaca.markets/v2/orders");
-    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, bodyStr.c_str());
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, writeCallback);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &responseBuffer);
+    curl_easy_setopt(curl.get(), CURLOPT_URL, "https://paper-api.alpaca.markets/v2/orders");
+    curl_easy_setopt(curl.get(), CURLOPT_HTTPHEADER, headers.get());
+    curl_easy_setopt(curl.get(), CURLOPT_POSTFIELDS, bodyStr.c_str());
+    curl_easy_setopt(curl.get(), CURLOPT_WRITEFUNCTION, writeCallback);
+    curl_easy_setopt(curl.get(), CURLOPT_WRITEDATA, &responseBuffer);
 
-    CURLcode res = curl_easy_perform(curl);
+    CURLcode res = curl_easy_perform(curl.get());
     long httpCode = 0;
-    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &httpCode);
+    curl_easy_getinfo(curl.get(), CURLINFO_RESPONSE_CODE, &httpCode);
 
     if (res != CURLE_OK) {
         logOrder("Order error (curl): " + std::string(curl_easy_strerror(res)), true);
@@ -82,9 +90,6 @@ void postOrder(const nlohmann::json& body) {
     } else {
         logOrder("Order placed: " + responseBuffer, false);
     }
-
-    curl_slist_free_all(headers);
-    curl_easy_cleanup(curl);
 }
 } // namespace
 

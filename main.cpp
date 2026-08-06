@@ -38,8 +38,12 @@ static std::mutex bookMutex;
 static std::condition_variable bookCv;
 static bool newDataAvailable = false;
 
-// one signal per quote, used for the majority vote
-static std::vector<std::string> signalBuffer;
+// running tallies for the current window, O(1) per quote.
+// replaces the old signalBuffer vector that grew unbounded all window long.
+static int buyCount = 0;
+static int sellCount = 0;
+static int neuCount = 0;
+static int windowTicks = 0;
 static double spreadSum = 0.0;
 static double lastMid = 0.0;
 static std::chrono::steady_clock::time_point windowStart =
@@ -93,27 +97,13 @@ std::string evaluateSignal(const OrderBook& book) {
     }
 }
 
-// most common signal in the buffer
-std::string majoritySignal(const std::vector<std::string>& signals) {
-    std::map<std::string, int> counts;
-    for (const auto& s : signals) counts[s]++;
-
-    std::string best = "NEUTRAL";
-    int bestCount = -1;
-    for (const auto& [sig, count] : counts) {
-        if (count > bestCount) {
-            bestCount = count;
-            best = sig;
-        }
-    }
-
-    std::cout << "== Counting last " << signals.size() << " signals: "
-              << "BUY=" << counts["BUY"]
-              << " SELL=" << counts["SELL"]
-              << " NEUTRAL=" << counts["NEUTRAL"]
-              << " => Majority: " << best << " ==\n";
-
-    return best;
+// most common signal from the window tallies (BUY > NEUTRAL > SELL on a draw)
+std::string majorityFromCounts(int buy, int sell, int neu) {
+    int bestCount = std::max({buy, sell, neu});
+    if (bestCount <= 0) return "NEUTRAL";
+    if (buy == bestCount) return "BUY";
+    if (neu == bestCount) return "NEUTRAL";
+    return "SELL";
 }
 
 // bracket order (tp/sl) from the majority signal; entry is a limit at
@@ -195,7 +185,10 @@ int main() {
 
                 std::cout << "\n-- New quote received --\n";
                 std::string signal = evaluateSignal(latestBook);
-                signalBuffer.push_back(signal);
+                if (signal == "BUY")      buyCount++;
+                else if (signal == "SELL") sellCount++;
+                else                       neuCount++;
+                windowTicks++;
             } else {
                 lock.unlock();
             }
@@ -204,13 +197,18 @@ int main() {
         // also fires on timeout/spurious wake so we never skip a decision
         auto now = std::chrono::steady_clock::now();
         if (now - windowStart >= std::chrono::seconds(DECISION_INTERVAL_SECONDS)) {
-            if (!signalBuffer.empty()) {
-                std::string decision = majoritySignal(signalBuffer);
-                order(decision, static_cast<int>(signalBuffer.size()));
+            if (windowTicks > 0) {
+                std::string decision = majorityFromCounts(buyCount, sellCount, neuCount);
+                std::cout << "== Counting last " << windowTicks << " signals: "
+                          << "BUY=" << buyCount
+                          << " SELL=" << sellCount
+                          << " NEUTRAL=" << neuCount
+                          << " => Majority: " << decision << " ==\n";
+                order(decision, windowTicks);
             }
 
             // start a fresh window
-            signalBuffer.clear();
+            buyCount = sellCount = neuCount = windowTicks = 0;
             spreadSum = 0.0;
             windowStart = now;
         }
