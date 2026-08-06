@@ -14,7 +14,8 @@ add_executable(flow main.cpp
         websocket.h
         websocket.cpp
         order.cpp
-        order.h)
+        order.h
+        experts.h)
 
 target_link_libraries(flow PRIVATE
         Boost::system
@@ -48,6 +49,7 @@ if(GLFW_FOUND AND OpenGL_FOUND)
             websocket.cpp
             order.cpp
             order.h
+            experts.h
             ${IMGUI_SOURCES})
 
     target_include_directories(flow_gui PRIVATE imgui imgui/backends)

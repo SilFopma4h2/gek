@@ -36,6 +36,7 @@
 
 #include "websocket.h"
 #include "order.h"
+#include "experts.h"
 
 // ---------------------------------------------------------------------------
 // palette + theme
@@ -133,6 +134,9 @@ struct Settings {
     float tpMult = 3.0f;                // = TP_SPREAD_MULTIPLIER
     float slMult = 1.5f;                // = SL_SPREAD_MULTIPLIER
     int intervalMinutes = 5;            // = DECISION_INTERVAL_SECONDS / 60
+    float ofiThresh = (float)OFI_THRESHOLD;
+    float driftThresh = (float)DRIFT_THRESHOLD;
+    float absThresh = (float)ABSORPTION_THRESHOLD;
 };
 static Settings g_settings;
 
@@ -217,6 +221,7 @@ static int g_windowTicks = 0;
 
 static double g_spreadSum = 0.0;              // = spreadSum
 static double g_lastMid = 0.0;                // = lastMid
+static FlowState g_flow;                      // tallies for the new experts
 static std::chrono::steady_clock::time_point g_windowStart =
     std::chrono::steady_clock::now();         // = windowStart
 
@@ -226,6 +231,7 @@ static void resetWindow() {
     g_neuCount = 0;
     g_windowTicks = 0;
     g_spreadSum = 0.0;
+    g_flow = FlowState{};
     g_windowStart = std::chrono::steady_clock::now();
 }
 
@@ -353,16 +359,29 @@ static void dispatchOrderAsync(const OrderPlan& p, const std::string& signal) {
 static void runDecision() {
     int buy = g_buyCount, sell = g_sellCount, neu = g_neuCount;
     int ticks = g_windowTicks;
-    std::string decision = "NEUTRAL";
-    if (ticks > 0) {
-        decision = majorityFromCounts(buy, sell, neu);
-    }
+
+    // four experts each give one vote for this window
+    const std::string baseStr = majorityFromCounts(buy, sell, neu);
+    const ExpertSignal baseVote = baseStr == "BUY"  ? ExpertSignal::BUY
+                                : baseStr == "SELL" ? ExpertSignal::SELL
+                                                    : ExpertSignal::NEUTRAL;
+    const ExpertSignal ofiVote = ofiSignal(g_flow);
+    const ExpertSignal driftVote = driftSignal(g_flow);
+    const ExpertSignal absVote = absorptionSignal(g_flow);
+
+    std::string decision = ticks > 0 ? expertName(
+        combinedDecision(baseVote, ofiVote, driftVote, absVote))
+                                     : "NEUTRAL";
 
     logLine("== Counting last " + std::to_string(ticks) + " signals: "
             + "BUY=" + std::to_string(buy)
             + " SELL=" + std::to_string(sell)
-            + " NEUTRAL=" + std::to_string(neu)
-            + " => Majority: " + decision + " ==", signalColor(decision));
+            + " NEUTRAL=" + std::to_string(neu) + " ==", signalColor(decision));
+    logLine("Experts | base=" + std::string(expertName(baseVote))
+            + " OFI=" + expertName(ofiVote)
+            + " drift=" + expertName(driftVote)
+            + " absorption=" + expertName(absVote)
+            + " => " + decision, signalColor(decision));
 
     DecisionRecord rec;
     rec.timeStr = nowStr();
@@ -498,6 +517,7 @@ static void processQuotes() {
         QuoteMetrics m = computeMetrics(q);
         g_spreadSum += m.spread;
         g_lastMid = m.mid;
+        updateFlowState(g_flow, q.bid, q.ask, q.bid_volume, q.ask_volume);
         g_windowTicks++;
         if (m.signal == "BUY")      g_buyCount++;
         else if (m.signal == "SELL") g_sellCount++;
@@ -699,6 +719,14 @@ static void drawConnectionPanel() {
     ImGui::Checkbox("Place orders", &g_settings.orderEnabled);
     ImGui::DragFloat("TP multiplier", &g_settings.tpMult, 0.1f, 0.5f, 10.0f, "%.2f");
     ImGui::DragFloat("SL multiplier", &g_settings.slMult, 0.1f, 0.5f, 10.0f, "%.2f");
+
+    ImGui::SeparatorText("Expert thresholds");
+    if (ImGui::DragFloat("OFI", &g_settings.ofiThresh, 0.005f, 0.0f, 0.5f, "%.3f"))
+        OFI_THRESHOLD = g_settings.ofiThresh;
+    if (ImGui::DragFloat("Micro drift", &g_settings.driftThresh, 0.005f, 0.0f, 0.5f, "%.3f"))
+        DRIFT_THRESHOLD = g_settings.driftThresh;
+    if (ImGui::DragFloat("Absorption", &g_settings.absThresh, 0.005f, 0.0f, 0.5f, "%.3f"))
+        ABSORPTION_THRESHOLD = g_settings.absThresh;
 
     ImGui::SeparatorText("Window");
     ImGui::DragInt("Interval (minutes)", &g_settings.intervalMinutes, 1, 1, 60);
@@ -942,6 +970,25 @@ static void drawSignalPanel() {
         else decision = "NEUTRAL";
     }
     ImGui::TextColored(colF(signalColor(decision)), "%s", decision.c_str());
+
+    ImGui::SeparatorText("Expert votes");
+    const std::string baseStr = majorityFromCounts(buy, sell, neu);
+    const ExpertSignal baseVote = baseStr == "BUY"  ? ExpertSignal::BUY
+                                : baseStr == "SELL" ? ExpertSignal::SELL
+                                                    : ExpertSignal::NEUTRAL;
+    const ExpertSignal ofiVote = ofiSignal(g_flow);
+    const ExpertSignal driftVote = driftSignal(g_flow);
+    const ExpertSignal absVote = absorptionSignal(g_flow);
+    const ExpertSignal combined = combinedDecision(baseVote, ofiVote, driftVote, absVote);
+
+    ImGui::TextColored(colF(signalColor(expertName(baseVote))),  "Base        %s", expertName(baseVote));
+    ImGui::TextColored(colF(signalColor(expertName(ofiVote))),   "OFI         %s", expertName(ofiVote));
+    ImGui::TextColored(colF(signalColor(expertName(driftVote))), "Micro drift %s", expertName(driftVote));
+    ImGui::TextColored(colF(signalColor(expertName(absVote))),   "Absorption  %s", expertName(absVote));
+    ImGui::Separator();
+    ImGui::Text("Combined    ");
+    ImGui::SameLine();
+    ImGui::TextColored(colF(signalColor(expertName(combined))), "%s", expertName(combined));
 
     ImGui::Separator();
     if (ImGui::Button("Decide now", ImVec2(-1, 0))) {

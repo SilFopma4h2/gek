@@ -2,7 +2,6 @@
 #include <cmath>
 #include <deque>
 #include <vector>
-#include <map>
 #include "websocket.h"
 #include <cstdlib>
 #include <thread>
@@ -12,6 +11,7 @@
 #include <chrono>
 #include <csignal>
 #include "order.h"
+#include "experts.h"
 // config
 const std::string symbol = "SPY";
 // decide on a time window (5 min), not on a tick count
@@ -46,6 +46,7 @@ static int neuCount = 0;
 static int windowTicks = 0;
 static double spreadSum = 0.0;
 static double lastMid = 0.0;
+static FlowState g_flow;
 static std::chrono::steady_clock::time_point windowStart =
     std::chrono::steady_clock::now();
 
@@ -77,10 +78,6 @@ std::string evaluateSignal(const OrderBook& book) {
     // print the raw data
     std::cout << "Bid: " << book.bid << " | Ask: " << book.ask << " | Spread: " << spread << "\n";
     std::cout << "Mid: " << mid << " | Weighted Mid: " << wmid << "\n";
-
-    // keep running totals for the window
-    spreadSum += spread;
-    lastMid = mid;
 
     // signal logic
     std::cout << "SIGNAL: ";
@@ -185,6 +182,8 @@ int main() {
 
                 std::cout << "\n-- New quote received --\n";
                 std::string signal = evaluateSignal(latestBook);
+                updateFlowState(g_flow, latestBook.bid, latestBook.ask,
+                                latestBook.bid_volume, latestBook.ask_volume);
                 if (signal == "BUY")      buyCount++;
                 else if (signal == "SELL") sellCount++;
                 else                       neuCount++;
@@ -197,19 +196,38 @@ int main() {
         // also fires on timeout/spurious wake so we never skip a decision
         auto now = std::chrono::steady_clock::now();
         if (now - windowStart >= std::chrono::seconds(DECISION_INTERVAL_SECONDS)) {
-            if (windowTicks > 0) {
-                std::string decision = majorityFromCounts(buyCount, sellCount, neuCount);
+            if (windowTicks > 0 || g_flow.tickCount > 0) {
+                // keep the legacy order() inputs in sync with the flow state
+                spreadSum = g_flow.spreadSum;
+                lastMid = g_flow.lastMid;
+
+                const std::string baseStr = majorityFromCounts(buyCount, sellCount, neuCount);
+                const ExpertSignal baseVote = baseStr == "BUY"  ? ExpertSignal::BUY
+                                            : baseStr == "SELL" ? ExpertSignal::SELL
+                                                                : ExpertSignal::NEUTRAL;
+                const ExpertSignal ofiVote = ofiSignal(g_flow);
+                const ExpertSignal driftVote = driftSignal(g_flow);
+                const ExpertSignal absVote = absorptionSignal(g_flow);
+
                 std::cout << "== Counting last " << windowTicks << " signals: "
                           << "BUY=" << buyCount
                           << " SELL=" << sellCount
-                          << " NEUTRAL=" << neuCount
-                          << " => Majority: " << decision << " ==\n";
+                          << " NEUTRAL=" << neuCount << " ==\n";
+                std::cout << "Expert votes | base=" << expertName(baseVote)
+                          << " OFI=" << expertName(ofiVote)
+                          << " drift=" << expertName(driftVote)
+                          << " absorption=" << expertName(absVote) << "\n";
+
+                std::string decision = expertName(
+                    combinedDecision(baseVote, ofiVote, driftVote, absVote));
+                std::cout << "=> Majority: " << decision << "\n";
                 order(decision, windowTicks);
             }
 
             // start a fresh window
             buyCount = sellCount = neuCount = windowTicks = 0;
             spreadSum = 0.0;
+            g_flow = FlowState{};
             windowStart = now;
         }
     }
