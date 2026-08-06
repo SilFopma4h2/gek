@@ -2,6 +2,8 @@
 #include <cmath>
 #include <deque>
 #include <vector>
+#include <algorithm>
+#include <ctime>
 #include "websocket.h"
 #include <cstdlib>
 #include <thread>
@@ -17,7 +19,7 @@ const std::string symbol = "SPY";
 // decide on a time window (5 min), not on a tick count
 const int DECISION_INTERVAL_SECONDS = 5 * 60; // 5 minutes
 // set to true to actually place orders
-const bool orderyes = false;
+const bool orderyes = true;
 
 // tp/sl sized off the average spread in the window
 // 2:1 rr, tp further away than sl
@@ -56,42 +58,64 @@ static void handleSignal(int) {
     g_stop = 1;
 }
 
-// signal for a single quote
-std::string evaluateSignal(const OrderBook& book) {
-    // basic stuff
-    double spread = book.ask - book.bid;
-    double mid = (book.bid + book.ask) / 2.0;
+static std::string nowStr() {
+    auto now = std::chrono::system_clock::now();
+    auto t = std::chrono::system_clock::to_time_t(now);
+    std::tm tm{};
+    localtime_r(&t, &tm);
+    char buf[16];
+    std::strftime(buf, sizeof(buf), "%H:%M:%S", &tm);
+    return buf;
+}
 
-    double wmid = mid;
+// signal for a single quote; pure computation, no stdout (printing is the
+// CPU/IO heavy part at these quote rates, so the caller throttles it)
+struct QuoteMetrics {
+    double mid, wmid, spread, ratio;
+    std::string signal;
+};
 
-    // weighted mid
-    if ((book.bid_volume + book.ask_volume) > 0) {
-        wmid = (book.bid_volume * book.ask + book.ask_volume * book.bid) / (book.bid_volume + book.ask_volume);
+QuoteMetrics evaluateSignal(const OrderBook& book) {
+    QuoteMetrics m;
+    m.spread = book.ask - book.bid;
+    m.mid = (book.bid + book.ask) / 2.0;
+    m.wmid = m.mid;
+    m.ratio = 0.0;
+    const double totalSize = book.bid_volume + book.ask_volume;
+    if (totalSize > 0.0) {
+        m.wmid = (book.bid_volume * book.ask + book.ask_volume * book.bid) / totalSize;
+        m.ratio = (double)book.bid_volume / totalSize;
     }
 
-    // bid share of total volume
-    double Ratio = 0.0;
-    if ((book.bid_volume + book.ask_volume) > 0) {
-        Ratio = (double)book.bid_volume / (book.bid_volume + book.ask_volume);
+    // the IEX feed often sends bid/ask sizes of 0, which makes wmid == mid and
+    // Ratio == 0.0 (-> the volume rules below would ALWAYS return NEUTRAL).
+    // With no size info, fall back to mid-price momentum so the bot still
+    // produces a meaningful signal.
+    static double lastMidForMomentum = 0.0;
+    static bool hasMidForMomentum = false;
+
+    if (totalSize > 0.0) {
+        lastMidForMomentum = m.mid;
+        hasMidForMomentum = true;
+        if (m.wmid > m.mid && m.ratio > 0.60) m.signal = "BUY";
+        else if (m.wmid < m.mid && m.ratio < 0.40) m.signal = "SELL";
+        else m.signal = "NEUTRAL";
+        return m;
     }
 
-    // print the raw data
-    std::cout << "Bid: " << book.bid << " | Ask: " << book.ask << " | Spread: " << spread << "\n";
-    std::cout << "Mid: " << mid << " | Weighted Mid: " << wmid << "\n";
-
-    // signal logic
-    std::cout << "SIGNAL: ";
-    if (wmid > mid && Ratio > 0.60) {
-        std::cout << " BUY  (Buyer pressure dominant)\n";
-        return "BUY";
+    if (hasMidForMomentum) {
+        const double momentum = m.mid - lastMidForMomentum;
+        const double tick = std::max(0.01, m.spread * 0.5);
+        lastMidForMomentum = m.mid;
+        if (momentum > tick) m.signal = "BUY";
+        else if (momentum < -tick) m.signal = "SELL";
+        else m.signal = "NEUTRAL";
+        return m;
     }
-    else if (wmid < mid && Ratio < 0.40) {
-        std::cout << " SELL  (Seller pressure dominant)\n";
-        return "SELL";
-    } else {
-        std::cout << "NEUTRAL (Volumes in balance)\n";
-        return "NEUTRAL";
-    }
+    lastMidForMomentum = m.mid;
+    hasMidForMomentum = true;
+    m.signal = "NEUTRAL";
+    return m;
 }
 
 // most common signal from the window tallies (BUY > NEUTRAL > SELL on a draw)
@@ -180,14 +204,32 @@ int main() {
                 OrderBook latestBook = symbolOrderBook.back();
                 lock.unlock();
 
-                std::cout << "\n-- New quote received --\n";
-                std::string signal = evaluateSignal(latestBook);
+                QuoteMetrics metrics = evaluateSignal(latestBook);
                 updateFlowState(g_flow, latestBook.bid, latestBook.ask,
                                 latestBook.bid_volume, latestBook.ask_volume);
-                if (signal == "BUY")      buyCount++;
-                else if (signal == "SELL") sellCount++;
-                else                       neuCount++;
+                if (metrics.signal == "BUY")      buyCount++;
+                else if (metrics.signal == "SELL") sellCount++;
+                else                               neuCount++;
                 windowTicks++;
+
+                // throttle per-quote logging to ~1 line/sec with the previous
+                // signal, so high quote rates don't choke on stdout
+                static double lastLoggedMid = -1.0;
+                static std::string lastLoggedSignal = "NEUTRAL";
+                auto nowLog = std::chrono::steady_clock::now();
+                static auto lastQuoteLog = nowLog;
+                if (nowLog - lastQuoteLog >= std::chrono::milliseconds(1000)) {
+                    lastQuoteLog = nowLog;
+                    std::cout << nowStr() << " Bid=" << latestBook.bid
+                              << " Ask=" << latestBook.ask
+                              << " Mid=" << metrics.mid
+                              << " Spread=" << metrics.spread
+                              << " => " << metrics.signal
+                              << (metrics.signal != lastLoggedSignal ? " (changed)" : "")
+                              << "\n";
+                    lastLoggedMid = metrics.mid;
+                    lastLoggedSignal = metrics.signal;
+                }
             } else {
                 lock.unlock();
             }

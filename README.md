@@ -31,29 +31,106 @@ MIT-style-ish, but shorter. You may use, modify and share the code as long as yo
 3. The main thread wakes on a `condition_variable` whenever new data shows up, then calls `evaluateSignal()` on the latest quote.
 4. Every **5 minutes** (`DECISION_INTERVAL_SECONDS` in `main.cpp`) `majoritySignal()` picks the most common signal. A `BUY`/`SELL` majority sends a bracket order via `order()`; then the signal buffer and spread sum get reset.
 
-### Signal logic
+### Signal logic — the formulas
 
-Per quote:
+Every incoming quote carries four numbers: `bid`, `ask`, `bid_volume`, `ask_volume`.
+From those the base signal computes:
 
-- **Mid price**: `(bid + ask) / 2`
-- **Weighted mid price (wmid)**: price shifted towards the volume on the opposite side
-- **Ratio**: bid volume as a share of the total volume
+```
+spread = ask - bid
+mid    = (bid + ask) / 2
+total  = bid_volume + ask_volume
 
-Rules:
+wmid   = (bid_volume * ask + ask_volume * bid) / total      (if total > 0)
+ratio  = bid_volume / total                                  (if total > 0)
+```
 
-- `wmid > mid` and `ratio > 0.60` → **BUY** (buyer pressure)
-- `wmid < mid` and `ratio < 0.40` → **SELL** (seller pressure)
-- otherwise → **NEUTRAL**
+- **`mid`** is the plain midpoint of the spread.
+- **`wmid`** is the *microprice* / weighted mid. It's a real volume-weighted
+  average of the two prices, so it sits *inside* the spread. A heavy bid side
+  (`bid_volume > ask_volume`) pulls `wmid` up towards the ask, and vice versa.
+- **`ratio`** is the bid's share of the total top-of-book size (0.5 = perfectly
+  balanced).
+
+Per-quote signal:
+
+```
+wmid > mid  AND  ratio > 0.60   -> BUY    (bid side dominates)
+wmid < mid  AND  ratio < 0.40   -> SELL   (ask side dominates)
+otherwise                       -> NEUTRAL
+```
+
+> Note: because `wmid > mid` is mathematically equivalent to `ratio > 0.5`, the
+> `ratio` threshold is what actually decides — `0.60`/`0.40` is just a stricter
+> margin on top of the imbalance direction.
+
+**Zero-size fallback (momentum).** The free Alpaca **IEX** feed frequently sends
+`bid_volume`/`ask_volume` as `0`. With no size info `wmid == mid` and `ratio == 0`,
+so the volume rules would *always* return NEUTRAL. To avoid that the bot falls
+back to **mid-price momentum** per quote:
+
+```
+momentum = mid_now - mid_prev
+tick     = max(0.01, spread * 0.5)
+
+momentum >  tick  -> BUY
+momentum < -tick  -> SELL
+otherwise          -> NEUTRAL
+```
+
+So even without size data the bot still reacts to price moving up or down by at
+least half a tick (with a 1-cent floor).
 
 ### Decision (every 5 minutes)
 
-Each quote pushes a signal into `signalBuffer`. Once the **5-minute** window (`DECISION_INTERVAL_SECONDS`) is up:
+Once the **5-minute** window (`DECISION_INTERVAL_SECONDS`) is up, four **experts**
+vote and the results combine:
 
-1. `majoritySignal()` counts which signal showed up most → that's the decision.
-2. On `BUY`/`SELL`, `order(decision, tickCount)` sends a limit-bracket order at the current mid, with TP/SL based on the **average spread** over the window (a rough volatility measure).
-3. Buffers and the spread sum reset for the next window.
+- **Base expert** — majority of the per-quote signals in the window
+  (`majorityFromCounts`): whichever of BUY / SELL / NEUTRAL appears most often,
+  with BUY winning a 3-way draw.
+- **OFI (order-flow imbalance)** — cumulative signed size flow, normalised by
+  total volume:
+  ```
+  ofi += (bid >= prev.bid ?  Δbid_size : 0) - (ask <= prev.ask ? Δask_size : 0)
+  n    =  ofi / totalVolume
+  n >  +OFI_THRESHOLD  -> BUY        n < -OFI_THRESHOLD  -> SELL
+  ```
+- **Micro-price drift** — cumulative `(wmid - mid)`, expressed as a fraction of
+  the average spread so it's scale-free:
+  ```
+  n = Σ(wmid - mid) / (tickCount * avgSpread)      avgSpread = Σspread / tickCount
+  ```
+- **Liquidity absorption** — passively added minus cancelled size per side,
+  normalised by volume, a spoofing/pull detector.
 
-Ticks per window vary (it's a time window, not a count), so the average spread divides by however many ticks actually came in.
+All three expert thresholds (`OFI`, drift, absorption) default to
+`0.05 / 0.10 / 0.05` and are adjustable live in the GUI.
+
+**Combining the votes** (`combinedDecision`):
+
+```
+if  buy_votes >= 2  AND  buy > sell   -> BUY
+if  sell_votes >= 2 AND  sell > buy   -> SELL
+otherwise                              -> follow the base expert
+```
+
+A clear 2+ expert consensus carries the decision; otherwise the base expert's
+vote decides, so a lone BUY/SELL never gets silently dropped just because the
+other experts sat out on NEUTRAL.
+
+On a non-NEUTRAL decision, a limit-bracket order is placed at the current mid:
+
+```
+avgSpread = spreadSum / tickCount        (average spread this window)
+TP = entry + 3.0  * avgSpread            (take-profit, 3x the avg spread)
+SL = entry - 1.5  * avgSpread            (stop-loss,   1.5x the avg spread)
+```
+
+(2:1 reward:risk; reversed for SELL.) Orders are only sent if the **orders
+toggle is ON** in the GUI. Buffers, expert tallies and the spread sum all reset
+for the next window. Ticks per window vary — it's a time window, not a count —
+so averages divide by however many ticks actually came in.
 
 ## Requirements
 

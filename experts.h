@@ -139,13 +139,13 @@ inline ExpertSignal combinedDecision(ExpertSignal base, ExpertSignal ofi,
                     (drift == ExpertSignal::BUY) + (absorption == ExpertSignal::BUY);
     const int sell = (base == ExpertSignal::SELL) + (ofi == ExpertSignal::SELL) +
                      (drift == ExpertSignal::SELL) + (absorption == ExpertSignal::SELL);
-    const int neu = 4 - buy - sell;
 
-    if (buy > sell && buy > neu) return ExpertSignal::BUY;
-    if (sell > buy && sell > neu) return ExpertSignal::SELL;
-
-    if (buy == sell && base != ExpertSignal::NEUTRAL) return base;
-    return ExpertSignal::NEUTRAL;
+    // a clear expert consensus (2+ votes for one side) carries the decision;
+    // otherwise the incumbent base expert decides so its BUY/SELL is never
+    // silently dropped because the new experts sat out on NEUTRAL.
+    if (buy >= 2 && buy > sell) return ExpertSignal::BUY;
+    if (sell >= 2 && sell > buy) return ExpertSignal::SELL;
+    return base;
 }
 
 inline const char* expertName(ExpertSignal e) {

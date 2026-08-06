@@ -296,6 +296,11 @@ struct OrderBook {
     double ask_volume;
 };
 
+// previous quote's mid for the momentum fallback signal, updated only in
+// processQuotes() so the market-data panel can't corrupt the reference
+static double g_signalPrevMid = 0.0;
+static bool g_signalHasPrevMid = false;
+
 static std::mutex g_quoteMutex;
 static std::deque<OrderBook> g_quoteQueue;   
 
@@ -392,12 +397,28 @@ static QuoteMetrics computeMetrics(const OrderBook& book) {
     }
 
     
-    if (m.wmid > m.mid && m.ratio > 0.60) {
-        m.signal = "BUY";       
-    } else if (m.wmid < m.mid && m.ratio < 0.40) {
-        m.signal = "SELL";      
+    // signal logic
+    // the IEX feed often sends bid/ask sizes of 0, which makes wmid == mid and
+    // ratio == 0.0 -> the volume-based rules below would then ALWAYS return
+    // NEUTRAL. When there is no size info at all, fall back to mid-price
+    // momentum so the bot still produces a meaningful signal.
+    const double totalSize = book.bid_volume + book.ask_volume;
+    if (totalSize > 0.0) {
+        if (m.wmid > m.mid && m.ratio > 0.60) {
+            m.signal = "BUY";
+        } else if (m.wmid < m.mid && m.ratio < 0.40) {
+            m.signal = "SELL";
+        } else {
+            m.signal = "NEUTRAL";
+        }
+    } else if (g_signalHasPrevMid) {
+        const double momentum = m.mid - g_signalPrevMid;
+        const double tick = std::max(0.01, m.spread * 0.5);
+        if (momentum > tick) m.signal = "BUY";
+        else if (momentum < -tick) m.signal = "SELL";
+        else m.signal = "NEUTRAL";
     } else {
-        m.signal = "NEUTRAL";   
+        m.signal = "NEUTRAL";
     }
     return m;
 }
@@ -629,6 +650,8 @@ static void processQuotes() {
         else if (m.signal == "SELL") g_sellCount++;
         else                        g_neuCount++;
         g_lastSignal = m.signal;
+        g_signalPrevMid = m.mid;
+        g_signalHasPrevMid = true;
 
         g_midHistory.push_back(m.mid);
         g_spreadHistory.push_back(m.spread);
@@ -762,6 +785,19 @@ static void drawMenuBar() {
         ImGui::SameLine();
         ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(signalColor(g_lastSignal)),
                            "%s", g_lastSignal.c_str());
+        ImGui::Separator();
+
+        // orders on/off toggle in the top bar
+        const char* ordersBtn = g_settings.orderEnabled ? "Orders: ON" : "Orders: OFF";
+        ImGui::PushStyleColor(ImGuiCol_Text, g_settings.orderEnabled
+                                                ? ImGui::ColorConvertU32ToFloat4(col::green)
+                                                : ImGui::ColorConvertU32ToFloat4(col::textDim));
+        if (ImGui::Button(ordersBtn)) {
+            g_settings.orderEnabled = !g_settings.orderEnabled;
+            logLine(std::string("Orders turned ") +
+                    (g_settings.orderEnabled ? "ON" : "OFF") + ".", col::yellow);
+        }
+        ImGui::PopStyleColor(1);
 
         if (ImGui::BeginMenu("View")) {
             if (ImGui::MenuItem("Reset layout")) {
@@ -822,7 +858,24 @@ static void drawConnectionPanel() {
 
     ImGui::SeparatorText("Trading");
     ImGui::TextDisabled("Settings apply from the next decision");
-    ImGui::Checkbox("Place orders", &g_settings.orderEnabled);
+
+    // clear on/off orders toggle (also shown in the menu bar)
+    const bool ordersOn = g_settings.orderEnabled;
+    if (ordersOn) {
+        ImGui::PushStyleColor(ImGuiCol_Button, col::green);
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, col::green);
+    } else {
+        ImGui::PushStyleColor(ImGuiCol_Button, col::panelLt);
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, col::panel);
+    }
+    if (ImGui::Button(ordersOn ? "Orders: ON  (click to disable)" : "Orders: OFF  (click to enable)",
+                      ImVec2(-1, 0))) {
+        g_settings.orderEnabled = !g_settings.orderEnabled;
+        logLine(std::string("Orders turned ") +
+                (g_settings.orderEnabled ? "ON" : "OFF") + ".", col::yellow);
+    }
+    ImGui::PopStyleColor(2);
+
     ImGui::DragFloat("TP multiplier", &g_settings.tpMult, 0.1f, 0.5f, 10.0f, "%.2f");
     ImGui::DragFloat("SL multiplier", &g_settings.slMult, 0.1f, 0.5f, 10.0f, "%.2f");
 
