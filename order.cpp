@@ -15,6 +15,9 @@
 #include <condition_variable>
 #include <string>
 #include <memory>
+#include <atomic>
+#include <chrono>
+#include <cstdint>
 #include <curl/curl.h>
 
 namespace {
@@ -37,6 +40,9 @@ void logOrder(const std::string& msg, bool isError) {
         std::cout << msg << "\n";
     }
 }
+
+std::string summarizeError(long httpCode, const std::string& responseBody);
+std::string makeClientOrderId();
 
 // shared post logic for alpaca
 void postOrder(const nlohmann::json& body) {
@@ -86,10 +92,29 @@ void postOrder(const nlohmann::json& body) {
     if (res != CURLE_OK) {
         logOrder("Order error (curl): " + std::string(curl_easy_strerror(res)), true);
     } else if (httpCode >= 400) {
-        logOrder("Order error (HTTP " + std::to_string(httpCode) + "): " + responseBuffer, true);
+        logOrder(summarizeError(httpCode, responseBuffer), true);
     } else {
         logOrder("Order placed: " + responseBuffer, false);
     }
+}
+
+std::string summarizeError(long httpCode, const std::string& responseBody) {
+    try {
+        auto parsed = nlohmann::json::parse(responseBody);
+        int code = parsed.value("code", 0);
+        std::string msg = parsed.value("message", responseBody);
+        return "Order error (HTTP " + std::to_string(httpCode)
+               + ", Alpaca code " + std::to_string(code) + "): " + msg;
+    } catch (...) {
+        return "Order error (HTTP " + std::to_string(httpCode) + "): " + responseBody;
+    }
+}
+
+std::string makeClientOrderId() {
+    static std::atomic<uint64_t> counter{0};
+    auto now = std::chrono::system_clock::now().time_since_epoch();
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now).count();
+    return "flow++-" + std::to_string(ms) + "-" + std::to_string(counter.fetch_add(1));
 }
 } // namespace
 
@@ -114,13 +139,23 @@ void sendBracketOrder(const std::string& symbol,
                        double entryPrice,
                        double takeProfitPrice,
                        double stopLossPrice) {
+    if (entryPrice <= 0.0 || takeProfitPrice <= 0.0 || stopLossPrice <= 0.0) {
+        logOrder("Order cancelled: invalid (non-positive) prices, no quote yet? "
+                 + formatPrice(entryPrice) + " / " + formatPrice(takeProfitPrice)
+                 + " / " + formatPrice(stopLossPrice), true);
+        return;
+    }
+    if (side != "buy" && side != "sell") {
+        logOrder("Order cancelled: side must be buy or sell, got \"" + side + "\"", true);
+        return;
+    }
 // keep tp/sl at least one tick (0.01) off the entry so the formatted
 // prices never end up equal (alpaca rejects brackets with identical tp/sl)
 const double MIN_STEP = 0.01;
     if (side == "buy") {
         if (takeProfitPrice < entryPrice + MIN_STEP) takeProfitPrice = entryPrice + MIN_STEP;
         if (stopLossPrice > entryPrice - MIN_STEP) stopLossPrice = entryPrice - MIN_STEP;
-    } else if (side == "sell") {
+    } else {
         if (takeProfitPrice > entryPrice - MIN_STEP) takeProfitPrice = entryPrice - MIN_STEP;
         if (stopLossPrice < entryPrice + MIN_STEP) stopLossPrice = entryPrice + MIN_STEP;
     }
@@ -133,6 +168,7 @@ const double MIN_STEP = 0.01;
         {"limit_price", formatPrice(entryPrice)},
         {"time_in_force", "day"},
         {"order_class", "bracket"},
+        {"client_order_id", makeClientOrderId()},
         {"take_profit", {{"limit_price", formatPrice(takeProfitPrice)}}},
         {"stop_loss", {{"stop_price", formatPrice(stopLossPrice)}}}
     };
