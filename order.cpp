@@ -19,6 +19,7 @@
 #include <chrono>
 #include <cstdint>
 #include <curl/curl.h>
+#include "logger.h"
 
 namespace {
 // optional ui log callback (used by the gui, see setOrderLogCallback)
@@ -32,6 +33,7 @@ std::string formatPrice(double price) {
 }
 
 void logOrder(const std::string& msg, bool isError) {
+    if (isError) logError(msg);
     if (g_orderLogCb) {
         g_orderLogCb(msg, isError);
     } else if (isError) {
@@ -50,7 +52,7 @@ void postOrder(const nlohmann::json& body) {
     const char* secret = std::getenv("ALPACA_API_SECRET");
 
     if (!key || !secret) {
-        std::cerr << "ALPACA_API_KEY / ALPACA_API_SECRET not set, order cancelled\n";
+        logError("ALPACA_API_KEY / ALPACA_API_SECRET not set, order cancelled");
         return;
     }
 

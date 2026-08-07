@@ -9,6 +9,7 @@
 #include <nlohmann/json.hpp>
 #include <iostream>
 #include <thread>
+#include "logger.h"
 #include <chrono>
 #include <algorithm>
 
@@ -118,7 +119,7 @@ bool AlpacaWebSocket::connectAndListen() {
                 std::string type = evt["T"];
 
                 if (type == "error") {
-                    std::cerr << "Alpaca error: " << evt.dump() << "\n";
+                    logError("Alpaca error: " + evt.dump());
                     notifyStatus("Alpaca error: " + evt.dump());
                     return false;
                 } else if (type == "success") {
@@ -132,7 +133,7 @@ bool AlpacaWebSocket::connectAndListen() {
         }
 
         if (!authenticated) {
-            std::cerr << "Alpaca authentication failed\n";
+            logError("Alpaca authentication failed");
             notifyStatus("Authentication failed");
             return false;
         }
@@ -180,7 +181,7 @@ bool AlpacaWebSocket::connectAndListen() {
                         callback_(bp, ap, bs, as);
                     }
                 } else if (type == "error") {
-                    std::cerr << "Alpaca error: " << evt.dump() << "\n";
+                    logError("Alpaca error: " + evt.dump());
                     notifyStatus("Alpaca error: " + evt.dump());
                 } else if (type == "success" || type == "subscription") {
                     std::cout << "Alpaca status: " << evt.dump() << "\n";
@@ -191,7 +192,7 @@ bool AlpacaWebSocket::connectAndListen() {
         return true; // dropped cleanly
     } catch (std::exception const& e) {
         if (!stop_requested_.load()) {
-            std::cerr << "WebSocket error: " << e.what() << "\n";
+            logError(std::string("WebSocket error: ") + e.what());
             notifyStatus("WebSocket error: " + std::string(e.what()));
         }
         return false; // error, caller should reconnect
@@ -212,7 +213,7 @@ void AlpacaWebSocket::run() {
             backoff = INITIAL_BACKOFF_SECONDS; // ok session, reset the backoff
         }
 
-        std::cerr << "Connection lost, reconnecting in " << backoff << "s...\n";
+        logError("Connection lost, reconnecting in " + std::to_string(backoff) + "s...");
         notifyStatus("Connection lost");
         // sleep in steps so stop() gets picked up quickly
         for (int waited = 0; waited < backoff && !stop_requested_.load(); ++waited) {

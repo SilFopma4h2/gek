@@ -15,6 +15,8 @@ add_executable(flow main.cpp
         websocket.cpp
         order.cpp
         order.h
+        logger.h
+        logger.cpp
         experts.h)
 
 target_link_libraries(flow PRIVATE
@@ -49,6 +51,8 @@ if(GLFW_FOUND AND OpenGL_FOUND)
             websocket.cpp
             order.cpp
             order.h
+            logger.h
+            logger.cpp
             experts.h
             ${IMGUI_SOURCES})
 

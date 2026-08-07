@@ -6,6 +6,7 @@ cmake-build-*/
 .vscode/
 
 flow_gui.ini
+error.log
 webServerApiSettings.json
 .env
 *.env

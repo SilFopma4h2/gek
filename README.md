@@ -20,6 +20,7 @@ MIT-style-ish, but shorter. You may use, modify and share the code as long as yo
 | `gui.cpp` | Entry point for the GUI version (`flow_gui`); same logic as `main.cpp`, in a Dear ImGui UI |
 | `websocket.h` / `websocket.cpp` | Connects, authenticates and subscribes to Alpaca's websocket (Boost.Beast + OpenSSL) |
 | `order.h` / `order.cpp` | Place orders via the Alpaca REST API (libcurl) |
+| `logger.h` / `logger.cpp` | Appends every error to `error.log` (thread-safe, timestamped) |
 | `imgui/` | Vendored Dear ImGui (GLFW + OpenGL backends) |
 | `CMakeLists.txt` | Build config |
 | `build.sh` | Build and run |
@@ -193,6 +194,19 @@ A Dear ImGui + GLFW + OpenGL UI covering everything `main.cpp` does:
 - **Log**: scrolling, colored log (feed status, quotes, decisions, order results) with autoscroll and a "log every quote" toggle.
 
 Same timing as `main.cpp`: the decision fires as soon as the interval (default 5 minutes) elapses, and the majority signal decides whether an order is placed. Orders run on a worker thread so the UI doesn't stall.
+
+Same timing as `main.cpp`: the decision fires as soon as the interval (default 5 minutes) elapses, and the majority signal decides whether an order is placed. Orders run on a worker thread so the UI doesn't stall.
+
+## Error logging
+
+Every error is appended to **`error.log`** in the working directory, one timestamped line per error, as it happens. Both versions (console and GUI) write to the same file, from any thread:
+
+- websocket errors (Alpaca error messages, auth failures, dropped connections, reconnect notices)
+- order errors (curl/HTTP failures, Alpaca rejection responses, missing API keys, invalid prices/sides)
+- startup errors (missing `ALPACA_API_KEY` / `ALPACA_API_SECRET`)
+- GUI errors (GLFW init/window failures)
+
+The file is opened in append mode per error and is safe to tail while the bot runs: `tail -f error.log`. `error.log` is created at runtime and is gitignored.
 
 ## WSL2
 

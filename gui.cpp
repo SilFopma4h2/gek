@@ -32,6 +32,7 @@
 #include "websocket.h"
 #include "order.h"
 #include "experts.h"
+#include "logger.h"
 
 
 
@@ -1273,7 +1274,10 @@ static void drawLogPanel() {
 
 
 static void glfwErrorCallback(int code, const char* desc) {
-    std::cerr << "GLFW error (" << code << "): " << (desc ? desc : "?") << "\n";
+    std::string msg = "GLFW error (" + std::to_string(code) + "): "
+                      + (desc ? desc : "?");
+    logError(msg);
+    std::cerr << msg << "\n";
 }
 
 int main() {
@@ -1282,6 +1286,7 @@ int main() {
 
     glfwSetErrorCallback(glfwErrorCallback);
     if (!glfwInit()) {
+        logError("Failed to initialize GLFW.");
         std::cerr << "Failed to initialize GLFW.\n";
         return 1;
     }
@@ -1297,10 +1302,13 @@ int main() {
     if (!window) {
         const char* desc = nullptr;
         int code = glfwGetError(&desc);
-        std::cerr << "Failed to create window (GLFW " << code << ": "
-                  << (desc ? desc : "?") << ").\n"
-                  << "WSL2: make sure WSLg is active or an X server is running "
-                  << "(check 'echo $DISPLAY').\n";
+        std::string msg = "Failed to create window (GLFW "
+                          + std::to_string(code) + ": "
+                          + (desc ? desc : "?") + ").\n"
+                          + "WSL2: make sure WSLg is active or an X server is running "
+                          + "(check 'echo $DISPLAY').";
+        logError(msg);
+        std::cerr << msg << "\n";
         glfwTerminate();
         return 1;
     }

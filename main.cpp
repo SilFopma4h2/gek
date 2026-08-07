@@ -14,6 +14,7 @@
 #include <csignal>
 #include "order.h"
 #include "experts.h"
+#include "logger.h"
 // config
 const std::string symbol = "SPY";
 // decide on a time window (5 min), not on a tick count
@@ -166,6 +167,7 @@ int main() {
     const char* key    = std::getenv("ALPACA_API_KEY");
     const char* secret = std::getenv("ALPACA_API_SECRET");
     if (!key || !secret) {
+        logError("ALPACA_API_KEY / ALPACA_API_SECRET not set");
         std::cerr << "ALPACA_API_KEY / ALPACA_API_SECRET not set\n";
         return 1;
     }
