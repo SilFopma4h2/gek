@@ -18,20 +18,23 @@ find_package(nlohmann_json REQUIRED)
 find_package(Threads REQUIRED)
 find_package(CURL REQUIRED)
 
-add_executable(flow main.cpp
-        core.h
-        core.cpp
-        websocket.h
-        websocket.cpp
-        order.cpp
-        order.h
-        http_client.h
-        http_client.cpp
-        position.h
-        position.cpp
-        logger.h
-        logger.cpp
-        experts.h)
+add_executable(flow
+        src/main.cpp
+        src/core.h
+        src/core.cpp
+        src/websocket.h
+        src/websocket.cpp
+        src/order.cpp
+        src/order.h
+        src/http_client.h
+        src/http_client.cpp
+        src/position.h
+        src/position.cpp
+        src/logger.h
+        src/logger.cpp
+        src/experts.h)
+
+target_include_directories(flow PRIVATE src)
 
 target_link_libraries(flow PRIVATE
         Boost::system
@@ -60,23 +63,24 @@ if(GLFW_FOUND AND OpenGL_FOUND)
             imgui/backends/imgui_impl_opengl3.cpp
     )
 
-    add_executable(flow_gui gui.cpp
-            core.h
-            core.cpp
-            websocket.h
-            websocket.cpp
-            order.cpp
-            order.h
-            http_client.h
-            http_client.cpp
-            position.h
-            position.cpp
-            logger.h
-            logger.cpp
-            experts.h
+    add_executable(flow_gui
+            src/gui.cpp
+            src/core.h
+            src/core.cpp
+            src/websocket.h
+            src/websocket.cpp
+            src/order.cpp
+            src/order.h
+            src/http_client.h
+            src/http_client.cpp
+            src/position.h
+            src/position.cpp
+            src/logger.h
+            src/logger.cpp
+            src/experts.h
             ${IMGUI_SOURCES})
 
-    target_include_directories(flow_gui PRIVATE imgui imgui/backends)
+    target_include_directories(flow_gui PRIVATE src imgui imgui/backends)
 
     target_link_libraries(flow_gui PRIVATE
             Boost::system
