@@ -76,18 +76,21 @@ bool AlpacaWebSocket::connectAndListen() {
         }
 
         ws.next_layer().handshake(ssl::stream_base::client);
+
+        // set timeouts BEFORE the websocket handshake so a hung server
+        // can't keep stop() blocking; handshake_timeout covers the upgrade,
+        // idle_timeout covers subsequent reads.
+        websocket::stream_base::timeout timeout_opt;
+        timeout_opt.handshake_timeout = std::chrono::seconds(30);
+        timeout_opt.idle_timeout = std::chrono::seconds(5);
+        ws.set_option(timeout_opt);
+
         ws.set_option(websocket::stream_base::decorator(
             [](websocket::request_type& req) {
                 req.set(beast::http::field::user_agent, "hft-orderbook-sim");
             }));
         ws.handshake(ALPACA_HOST, ALPACA_PATH);
         notifyStatus("WebSocket connected, authenticating...");
-
-        // idle timeout so a blocking read can't hang shutdown forever
-        websocket::stream_base::timeout timeout_opt;
-        timeout_opt.handshake_timeout = std::chrono::seconds(30);
-        timeout_opt.idle_timeout = std::chrono::seconds(5);
-        ws.set_option(timeout_opt);
 
         json auth_msg = {
             {"action", "auth"},

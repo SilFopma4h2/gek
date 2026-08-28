@@ -13,6 +13,7 @@
 #include <chrono>
 #include <csignal>
 #include "order.h"
+#include "position.h"
 #include "core.h"
 #include "experts.h"
 #include "logger.h"
@@ -55,8 +56,12 @@ static std::string nowStr() {
 }
 
 // bracket order (tp/sl) from the majority signal; entry is a limit at
-// the current mid so tp/sl anchor to a known price
-static void placeOrder(const std::string& signal, const Decision& d) {
+// the current mid so tp/sl anchor to a known price. The PositionGuard
+// blocks the order if we already have a working order or an open
+// position in the same direction — prevents the bot from piling up
+// duplicate brackets across windows.
+static void placeOrder(const std::string& signal, const Decision& d,
+                       pos::PositionGuard& guard) {
     if (!orderyes) {
         std::cout << "orders are disabled, no orders placed\n";
         return;
@@ -64,6 +69,12 @@ static void placeOrder(const std::string& signal, const Decision& d) {
     if (signal == "BUY") {
         double tp = d.lastMid + TP_SPREAD_MULTIPLIER * d.avgSpread;
         double sl = d.lastMid - SL_SPREAD_MULTIPLIER * d.avgSpread;
+        auto verdict = guard.canPlaceOrder("buy");
+        if (!verdict.allowed) {
+            std::cout << "-> BUY blocked by position guard: "
+                      << verdict.reason << "\n";
+            return;
+        }
         std::cout << "-> BUY limit+bracket: entry=" << d.lastMid
                   << " qty=1, TP=" << tp << " SL=" << sl
                   << " (avgSpread=" << d.avgSpread << ")\n";
@@ -72,6 +83,12 @@ static void placeOrder(const std::string& signal, const Decision& d) {
     else if (signal == "SELL") {
         double tp = d.lastMid - TP_SPREAD_MULTIPLIER * d.avgSpread;
         double sl = d.lastMid + SL_SPREAD_MULTIPLIER * d.avgSpread;
+        auto verdict = guard.canPlaceOrder("sell");
+        if (!verdict.allowed) {
+            std::cout << "-> SELL blocked by position guard: "
+                      << verdict.reason << "\n";
+            return;
+        }
         std::cout << "-> SELL limit+bracket: entry=" << d.lastMid
                   << " qty=1, TP=" << tp << " SL=" << sl
                   << " (avgSpread=" << d.avgSpread << ")\n";
@@ -96,6 +113,7 @@ int main() {
     AlpacaWebSocket client(key, secret, {symbol});
     DecisionCore core;
     core.setIntervalSeconds(DECISION_INTERVAL_SECONDS);
+    pos::PositionGuard guard(symbol);
 
     client.setQuoteCallback([](double bid, double ask,
                                 double bid_volume, double ask_volume) {
@@ -165,7 +183,8 @@ int main() {
                           << " drift=" << expertName(d.drift)
                           << " absorption=" << expertName(d.absorption) << "\n";
                 std::cout << "=> Majority: " << expertName(d.combined) << "\n";
-                placeOrder(expertName(d.combined), d);
+                guard.refresh();
+                placeOrder(expertName(d.combined), d, guard);
             } else {
                 core.resetWindow();
             }

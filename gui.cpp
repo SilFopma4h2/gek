@@ -25,6 +25,7 @@
 
 #include "websocket.h"
 #include "order.h"
+#include "position.h"
 #include "core.h"
 #include "experts.h"
 #include "logger.h"
@@ -127,6 +128,14 @@ struct Settings {
 // thread) and is the only one that mutates them.
 static Settings g_settings;
 static std::mutex g_uiMutex;
+
+// PositionGuard is shared between runDecision() (called from the GUI thread)
+// and the connection panel (which shows the latest snapshot). It is only
+// mutated on the GUI thread, so no extra mutex is needed around it.
+static pos::PositionGuard g_guard("SPY", pos::DEFAULT_TTL);
+static pos::Snapshot g_guardSnapshot;
+static std::chrono::steady_clock::time_point g_guardLastRefresh{};
+
 
 struct LogEntry {
     std::string text;
@@ -343,6 +352,15 @@ static OrderPlan makeOrderPlan(const Decision& d) {
 }
 
 static void dispatchOrderAsync(const OrderPlan& p, const std::string& signal) {
+    std::string lower = signal;
+    std::transform(lower.begin(), lower.end(), lower.begin(),
+                   [](unsigned char c) { return std::tolower(c); });
+    auto verdict = g_guard.canPlaceOrder(lower);
+    if (!verdict.allowed) {
+        logLine("-> " + signal + " BLOCKED: " + verdict.reason, col::yellow);
+        return;
+    }
+
     logLine("-> " + signal + " limit+bracket: entry=" + formatPrice(p.entry)
             + " qty=1, TP=" + formatPrice(p.tp) + " SL=" + formatPrice(p.sl),
             col::green);
@@ -389,6 +407,11 @@ static void runDecision() {
         rec.sl = plan.sl;
         rec.orderPlaced = plan.enabled;
         if (plan.enabled) {
+            // refresh the position guard before we send, so we never
+            // dispatch while a previous bracket is still working
+            g_guard.refresh();
+            g_guardSnapshot = g_guard.snapshot();
+            g_guardLastRefresh = std::chrono::steady_clock::now();
             dispatchOrderAsync(plan, decision);
         } else {
             logLine("Orders are disabled, no order placed.", col::textDim);
@@ -658,6 +681,19 @@ static void drawMenuBar() {
     }
 }
 
+static void refreshGuardSnapshot() {
+    // called by the connection panel; refreshes no more than once per
+    // DEFAULT_TTL so we don't hammer the REST API on every redraw.
+    bool neverFetched = g_guardLastRefresh.time_since_epoch().count() == 0;
+    bool aged = std::chrono::steady_clock::now() - g_guardLastRefresh
+                > pos::DEFAULT_TTL;
+    if (neverFetched || aged) {
+        g_guard.refresh();
+        g_guardSnapshot = g_guard.snapshot();
+        g_guardLastRefresh = std::chrono::steady_clock::now();
+    }
+}
+
 static void drawConnectionPanel() {
     Layout L = layout();
     applyPanelPlacement(L.connPos, L.connSz);
@@ -744,6 +780,38 @@ static void drawConnectionPanel() {
     if (ImGui::Button("Reset window", ImVec2(-1, 0))) {
         g_core.resetWindow();
         logLine("Window manually reset.", col::textDim);
+    }
+
+    ImGui::SeparatorText("Position & pending orders");
+    refreshGuardSnapshot();
+    if (!g_guardSnapshot.error.empty()) {
+        ImGui::TextColored(ImVec4(0.973f, 0.318f, 0.286f, 1.0f),
+                           "Guard: %s", g_guardSnapshot.error.c_str());
+    }
+    if (g_guardSnapshot.positions.empty()) {
+        ImGui::TextDisabled("No open position");
+    } else {
+        for (const auto& p : g_guardSnapshot.positions) {
+            ImGui::TextColored(ImVec4(0.247f, 0.725f, 0.314f, 1.0f),
+                               "%s: %s %.4f @ $%.2f",
+                               p.side.c_str(), p.symbol.c_str(),
+                               p.qty, p.avgEntryPrice);
+        }
+    }
+    if (g_guardSnapshot.orders.empty()) {
+        ImGui::TextDisabled("No working orders");
+    } else {
+        for (const auto& o : g_guardSnapshot.orders) {
+            ImGui::TextColored(ImVec4(0.973f, 0.652f, 0.176f, 1.0f),
+                               "%s %s x%.0f ($%.2f) [%s]",
+                               o.side.c_str(), o.type.c_str(),
+                               o.qty, o.limitPrice, o.status.c_str());
+        }
+    }
+    if (ImGui::Button("Refresh", ImVec2(-1, 0))) {
+        g_guard.refresh();
+        g_guardSnapshot = g_guard.snapshot();
+        g_guardLastRefresh = std::chrono::steady_clock::now();
     }
 
     ImGui::End();

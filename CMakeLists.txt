@@ -25,6 +25,10 @@ add_executable(flow main.cpp
         websocket.cpp
         order.cpp
         order.h
+        http_client.h
+        http_client.cpp
+        position.h
+        position.cpp
         logger.h
         logger.cpp
         experts.h)
@@ -63,6 +67,10 @@ if(GLFW_FOUND AND OpenGL_FOUND)
             websocket.cpp
             order.cpp
             order.h
+            http_client.h
+            http_client.cpp
+            position.h
+            position.cpp
             logger.h
             logger.cpp
             experts.h
