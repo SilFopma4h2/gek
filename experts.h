@@ -1,10 +1,10 @@
 // experts.h
 //
 // Order-flow experts that vote alongside the base signal (weighted-mid vs
-// mid + bid ratio) in main.cpp / gui.cpp. Every expert consumes only the
-// fields the websocket already delivers (bid, ask, bid volume, ask volume)
-// and produces a per-window BUY / SELL / NEUTRAL vote from running tallies
-// that are reset together with the existing decision window.
+// mid + bid ratio) in core.cpp. Every expert consumes only the fields the
+// websocket already delivers (bid, ask, bid volume, ask volume) and produces
+// a per-window BUY / SELL / NEUTRAL vote from running tallies that are reset
+// together with the existing decision window.
 //
 // The final decision is a simple majority over the four votes; on a 2-2 tie
 // it falls back to the base expert so the incumbent behaviour is preserved
@@ -51,11 +51,6 @@ struct FlowState {
     double cancelAsk = 0.0;
 };
 
-// tunable thresholds (runtime-adjustable from the GUI)
-inline double OFI_THRESHOLD = 0.05;      // frac of total volume
-inline double DRIFT_THRESHOLD = 0.10;    // frac of average spread
-inline double ABSORPTION_THRESHOLD = 0.05; // frac of total volume
-
 // call once per quote, before reading the votes
 inline void updateFlowState(FlowState& s, double bid, double ask,
                             double bid_volume, double ask_volume) {
@@ -99,35 +94,44 @@ inline void updateFlowState(FlowState& s, double bid, double ask,
     s.hasPrev = true;
 }
 
+// Expert thresholds, owned by core.cpp. The GUI mutates them through
+// setThresholds(); readers grab a copy via thresholds() so the call site
+// never touches a possibly-mutating global directly.
+struct Thresholds {
+    double ofi = 0.05;        // frac of total volume
+    double drift = 0.10;      // frac of average spread
+    double absorption = 0.05; // frac of total volume
+};
+
 // Expert 2 - Order Flow Imbalance: net signed size flow, normalised by volume.
-inline ExpertSignal ofiSignal(const FlowState& s) {
+inline ExpertSignal ofiSignal(const FlowState& s, const Thresholds& t) {
     if (s.totalVolume <= 0.0) return ExpertSignal::NEUTRAL;
     const double n = s.ofiSum / s.totalVolume;
-    if (n > OFI_THRESHOLD) return ExpertSignal::BUY;
-    if (n < -OFI_THRESHOLD) return ExpertSignal::SELL;
+    if (n > t.ofi) return ExpertSignal::BUY;
+    if (n < -t.ofi) return ExpertSignal::SELL;
     return ExpertSignal::NEUTRAL;
 }
 
 // Expert 3 - Microprice Drift: cumulative weighted-mid pressure, expressed as
 // a fraction of the average spread so it is scale-free across tick rates.
-inline ExpertSignal driftSignal(const FlowState& s) {
+inline ExpertSignal driftSignal(const FlowState& s, const Thresholds& t) {
     if (s.tickCount <= 0.0) return ExpertSignal::NEUTRAL;
     const double avgSpread = s.spreadSum / s.tickCount;
     if (avgSpread <= 0.0) return ExpertSignal::NEUTRAL;
     const double n = s.driftSum / (s.tickCount * avgSpread);
-    if (n > DRIFT_THRESHOLD) return ExpertSignal::BUY;
-    if (n < -DRIFT_THRESHOLD) return ExpertSignal::SELL;
+    if (n > t.drift) return ExpertSignal::BUY;
+    if (n < -t.drift) return ExpertSignal::SELL;
     return ExpertSignal::NEUTRAL;
 }
 
 // Expert 4 - Liquidity Absorption / Spoof Index: net passive commitment
 // (added minus cancelled) on the bid vs the ask, normalised by volume.
-inline ExpertSignal absorptionSignal(const FlowState& s) {
+inline ExpertSignal absorptionSignal(const FlowState& s, const Thresholds& t) {
     if (s.totalVolume <= 0.0) return ExpertSignal::NEUTRAL;
     const double pressure = ((s.absorbBid - s.cancelBid) -
                              (s.absorbAsk - s.cancelAsk)) / s.totalVolume;
-    if (pressure > ABSORPTION_THRESHOLD) return ExpertSignal::BUY;
-    if (pressure < -ABSORPTION_THRESHOLD) return ExpertSignal::SELL;
+    if (pressure > t.absorption) return ExpertSignal::BUY;
+    if (pressure < -t.absorption) return ExpertSignal::SELL;
     return ExpertSignal::NEUTRAL;
 }
 
