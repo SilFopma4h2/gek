@@ -1,10 +1,4 @@
 
-
-
-
-
-
-
 #include <algorithm>
 #include <atomic>
 #include <cfloat>
@@ -31,11 +25,9 @@
 
 #include "websocket.h"
 #include "order.h"
+#include "core.h"
 #include "experts.h"
 #include "logger.h"
-
-
-
 
 namespace col {
 const ImU32 bg       = IM_COL32(20, 22, 26, 255);
@@ -121,24 +113,20 @@ static void applyTheme() {
     c[ImGuiCol_TextSelectedBg]       = ImVec4(0.247f, 0.447f, 0.702f, 0.40f);
 }
 
-
-
-
 struct Settings {
     char symbol[16] = "SPY";
-    bool orderEnabled = false;          
-    float tpMult = 3.0f;                
-    float slMult = 1.5f;                
-    int intervalMinutes = 5;            
-    float ofiThresh = (float)OFI_THRESHOLD;
-    float driftThresh = (float)DRIFT_THRESHOLD;
-    float absThresh = (float)ABSORPTION_THRESHOLD;
+    bool orderEnabled = false;
+    float tpMult = 3.0f;
+    float slMult = 1.5f;
+    int intervalMinutes = 5;
     char timezone[48] = "Europe/Amsterdam";
 };
+// All UI-side state; protected by g_uiMutex so the websocket thread can
+// append to g_quoteQueue without racing the render thread. The render
+// thread owns everything else (settings, log, charts, decisions, feed
+// thread) and is the only one that mutates them.
 static Settings g_settings;
-
-
-
+static std::mutex g_uiMutex;
 
 struct LogEntry {
     std::string text;
@@ -178,9 +166,6 @@ static ImU32 signalColor(const std::string& s) {
 }
 
 static ImVec4 colF(ImU32 c) { return ImGui::ColorConvertU32ToFloat4(c); }
-
-
-
 
 static constexpr int MARKET_OPEN_MIN  = 9 * 60 + 30;
 static constexpr int MARKET_CLOSE_MIN = 16 * 60;
@@ -290,64 +275,10 @@ static std::string zoneShort(const std::string& z) {
     return pos == std::string::npos ? z : z.substr(pos + 1);
 }
 
-struct OrderBook {
-    double bid;
-    double ask;
-    double bid_volume;
-    double ask_volume;
-};
-
-// previous quote's mid for the momentum fallback signal, updated only in
-// processQuotes() so the market-data panel can't corrupt the reference
-static double g_signalPrevMid = 0.0;
-static bool g_signalHasPrevMid = false;
-
-static std::mutex g_quoteMutex;
-static std::deque<OrderBook> g_quoteQueue;   
-
-
-static constexpr size_t QUOTE_QUEUE_CAP = 4096;
-
-static std::mutex g_statusMutex;
-static std::string g_statusText = "Not connected";
-static bool g_connected = false;
-
-static std::mutex g_feedMutex;
-static std::shared_ptr<AlpacaWebSocket> g_client;
-static std::thread g_feedThread;
-
-static std::vector<std::string> g_timezones;
-
-
-
-
-static std::deque<OrderBook> g_bookData;      
-
-
-
-
-static int g_buyCount = 0;
-static int g_sellCount = 0;
-static int g_neuCount = 0;
-static int g_windowTicks = 0;
-
-static double g_spreadSum = 0.0;              
-static double g_lastMid = 0.0;                
-static FlowState g_flow;                      
-static std::chrono::steady_clock::time_point g_windowStart =
-    std::chrono::steady_clock::now();         
-
-static void resetWindow() {
-    g_buyCount = 0;
-    g_sellCount = 0;
-    g_neuCount = 0;
-    g_windowTicks = 0;
-    g_spreadSum = 0.0;
-    g_flow = FlowState{};
-    g_windowStart = std::chrono::steady_clock::now();
-}
-
-static std::deque<double> g_bidHistory;       
+// all signal/state is owned by this; main thread only.
+static DecisionCore g_core;
+static std::deque<OrderBook> g_bookData;
+static std::deque<double> g_bidHistory;
 static std::deque<double> g_askHistory;
 static std::deque<double> g_midHistory;
 static std::deque<double> g_spreadHistory;
@@ -368,74 +299,22 @@ static std::string g_lastSignal = "NEUTRAL";
 static bool g_logEveryQuote = true;
 static bool g_autoScroll = true;
 
-
 static std::chrono::steady_clock::time_point g_lastQuoteLog =
     std::chrono::steady_clock::now();
 
+static std::mutex g_quoteMutex;
+static std::deque<OrderBook> g_quoteQueue;
+static constexpr size_t QUOTE_QUEUE_CAP = 4096;
 
+static std::mutex g_statusMutex;
+static std::string g_statusText = "Not connected";
+static bool g_connected = false;
 
+static std::mutex g_feedMutex;
+static std::shared_ptr<AlpacaWebSocket> g_client;
+static std::thread g_feedThread;
 
-struct QuoteMetrics {
-    double spread;
-    double mid;
-    double wmid;
-    double ratio;
-    std::string signal;
-};
-
-static QuoteMetrics computeMetrics(const OrderBook& book) {
-    QuoteMetrics m;
-    m.spread = book.ask - book.bid;
-    m.mid = (book.bid + book.ask) / 2.0;
-
-    
-    m.wmid = m.mid;
-    m.ratio = 0.0;
-    if ((book.bid_volume + book.ask_volume) > 0) {
-        m.wmid = (book.bid_volume * book.ask + book.ask_volume * book.bid)
-                 / (book.bid_volume + book.ask_volume);
-        m.ratio = (double)book.bid_volume / (book.bid_volume + book.ask_volume);
-    }
-
-    
-    // signal logic
-    // the IEX feed often sends bid/ask sizes of 0, which makes wmid == mid and
-    // ratio == 0.0 -> the volume-based rules below would then ALWAYS return
-    // NEUTRAL. When there is no size info at all, fall back to mid-price
-    // momentum so the bot still produces a meaningful signal.
-    const double totalSize = book.bid_volume + book.ask_volume;
-    if (totalSize > 0.0) {
-        if (m.wmid > m.mid && m.ratio > 0.60) {
-            m.signal = "BUY";
-        } else if (m.wmid < m.mid && m.ratio < 0.40) {
-            m.signal = "SELL";
-        } else {
-            m.signal = "NEUTRAL";
-        }
-    } else if (g_signalHasPrevMid) {
-        const double momentum = m.mid - g_signalPrevMid;
-        const double tick = std::max(0.01, m.spread * 0.5);
-        if (momentum > tick) m.signal = "BUY";
-        else if (momentum < -tick) m.signal = "SELL";
-        else m.signal = "NEUTRAL";
-    } else {
-        m.signal = "NEUTRAL";
-    }
-    return m;
-}
-
-
-
-static std::string majorityFromCounts(int buy, int sell, int neu) {
-    int bestCount = std::max({buy, sell, neu});
-    if (bestCount <= 0) return "NEUTRAL";
-    if (buy == bestCount) return "BUY";
-    if (neu == bestCount) return "NEUTRAL";
-    return "SELL";
-}
-
-
-
+static std::vector<std::string> g_timezones;
 
 struct OrderPlan {
     std::string side;
@@ -445,34 +324,29 @@ struct OrderPlan {
     bool enabled = false;
 };
 
-static OrderPlan makeOrderPlan(const std::string& signal, int tickCount) {
+static OrderPlan makeOrderPlan(const Decision& d) {
     OrderPlan p;
     p.enabled = g_settings.orderEnabled;
     if (!p.enabled) return p;
-
-    double avgSpread = tickCount > 0 ? g_spreadSum / tickCount : 0.0;
-    double entry = g_lastMid;
-    p.entry = entry;
-
-    if (signal == "BUY") {
+    p.entry = d.lastMid;
+    const std::string name = expertName(d.combined);
+    if (name == "BUY") {
         p.side = "buy";
-        p.tp = entry + g_settings.tpMult * avgSpread;
-        p.sl = entry - g_settings.slMult * avgSpread;
-    } else if (signal == "SELL") {
+        p.tp = d.lastMid + g_settings.tpMult * d.avgSpread;
+        p.sl = d.lastMid - g_settings.slMult * d.avgSpread;
+    } else if (name == "SELL") {
         p.side = "sell";
-        p.tp = entry - g_settings.tpMult * avgSpread;
-        p.sl = entry + g_settings.slMult * avgSpread;
+        p.tp = d.lastMid - g_settings.tpMult * d.avgSpread;
+        p.sl = d.lastMid + g_settings.slMult * d.avgSpread;
     }
     return p;
 }
 
 static void dispatchOrderAsync(const OrderPlan& p, const std::string& signal) {
     logLine("-> " + signal + " limit+bracket: entry=" + formatPrice(p.entry)
-            + " qty=1, TP=" + formatPrice(p.tp) + " SL=" + formatPrice(p.sl)
-            + " (avgSpread=" + formatPrice(g_spreadSum / std::max(1, g_windowTicks), 3) + ")",
+            + " qty=1, TP=" + formatPrice(p.tp) + " SL=" + formatPrice(p.sl),
             col::green);
 
-    
     std::string symbol(g_settings.symbol);
     std::string side = p.side;
     double entry = p.entry, tp = p.tp, sl = p.sl;
@@ -481,46 +355,35 @@ static void dispatchOrderAsync(const OrderPlan& p, const std::string& signal) {
     }).detach();
 }
 
-
-
-
 static void runDecision() {
-    int buy = g_buyCount, sell = g_sellCount, neu = g_neuCount;
-    int ticks = g_windowTicks;
+    if (g_core.tickCount() <= 0) {
+        g_core.resetWindow();
+        return;
+    }
 
-    
-    const std::string baseStr = majorityFromCounts(buy, sell, neu);
-    const ExpertSignal baseVote = baseStr == "BUY"  ? ExpertSignal::BUY
-                                : baseStr == "SELL" ? ExpertSignal::SELL
-                                                    : ExpertSignal::NEUTRAL;
-    const ExpertSignal ofiVote = ofiSignal(g_flow);
-    const ExpertSignal driftVote = driftSignal(g_flow);
-    const ExpertSignal absVote = absorptionSignal(g_flow);
+    Decision d = g_core.runDecision();
+    std::string decision = expertName(d.combined);
 
-    std::string decision = ticks > 0 ? expertName(
-        combinedDecision(baseVote, ofiVote, driftVote, absVote))
-                                     : "NEUTRAL";
-
-    logLine("== Counting last " + std::to_string(ticks) + " signals: "
-            + "BUY=" + std::to_string(buy)
-            + " SELL=" + std::to_string(sell)
-            + " NEUTRAL=" + std::to_string(neu) + " ==", signalColor(decision));
-    logLine("Experts | base=" + std::string(expertName(baseVote))
-            + " OFI=" + expertName(ofiVote)
-            + " drift=" + expertName(driftVote)
-            + " absorption=" + expertName(absVote)
+    logLine("== Counting last " + std::to_string(d.tickCount) + " signals: "
+            + "BUY=" + std::to_string(d.buyCount)
+            + " SELL=" + std::to_string(d.sellCount)
+            + " NEUTRAL=" + std::to_string(d.neuCount) + " ==", signalColor(decision));
+    logLine("Experts | base=" + std::string(expertName(d.base))
+            + " OFI=" + expertName(d.ofi)
+            + " drift=" + expertName(d.drift)
+            + " absorption=" + expertName(d.absorption)
             + " => " + decision, signalColor(decision));
 
     DecisionRecord rec;
     rec.timeStr = nowStr();
     rec.decision = decision;
-    rec.buy = buy;
-    rec.sell = sell;
-    rec.neu = neu;
-    rec.ticks = ticks;
+    rec.buy = d.buyCount;
+    rec.sell = d.sellCount;
+    rec.neu = d.neuCount;
+    rec.ticks = d.tickCount;
 
     if (decision != "NEUTRAL") {
-        OrderPlan plan = makeOrderPlan(decision, ticks);
+        OrderPlan plan = makeOrderPlan(d);
         rec.entry = plan.entry;
         rec.tp = plan.tp;
         rec.sl = plan.sl;
@@ -536,23 +399,11 @@ static void runDecision() {
 
     g_decisions.push_front(rec);
     if (g_decisions.size() > DECISION_CAP) g_decisions.pop_back();
-
-    
-    resetWindow();
 }
-
 
 static void runDecisionCheck() {
-    auto now = std::chrono::steady_clock::now();
-    int intervalSec = g_settings.intervalMinutes * 60;
-    if (std::chrono::duration_cast<std::chrono::seconds>(now - g_windowStart).count()
-        >= intervalSec) {
-        runDecision();
-    }
+    if (g_core.windowElapsed()) runDecision();
 }
-
-
-
 
 static bool feedIsRunning() {
     std::lock_guard<std::mutex> lock(g_feedMutex);
@@ -560,10 +411,12 @@ static bool feedIsRunning() {
 }
 
 static void startFeed() {
-    std::lock_guard<std::mutex> lock(g_feedMutex);
-    if (g_feedThread.joinable()) {
-        logLine("Feed is already running.", col::yellow);
-        return;
+    {
+        std::lock_guard<std::mutex> lock(g_feedMutex);
+        if (g_feedThread.joinable()) {
+            logLine("Feed is already running.", col::yellow);
+            return;
+        }
     }
 
     const char* key = std::getenv("ALPACA_API_KEY");
@@ -579,17 +432,17 @@ static void startFeed() {
     }
 
     std::string sym(g_settings.symbol);
-    g_client = std::make_shared<AlpacaWebSocket>(key, secret,
-                                                  std::vector<std::string>{sym});
+    auto client = std::make_shared<AlpacaWebSocket>(key, secret,
+                                                    std::vector<std::string>{sym});
 
-    g_client->setQuoteCallback([](double bid, double ask,
-                                  double bid_volume, double ask_volume) {
+    client->setQuoteCallback([](double bid, double ask,
+                                double bid_volume, double ask_volume) {
         std::lock_guard<std::mutex> lock(g_quoteMutex);
         if (g_quoteQueue.size() >= QUOTE_QUEUE_CAP) g_quoteQueue.pop_front();
         g_quoteQueue.push_back(OrderBook{bid, ask, bid_volume, ask_volume});
     });
 
-    g_client->setStatusCallback([](const std::string& msg) {
+    client->setStatusCallback([](const std::string& msg) {
         logLine("[feed] " + msg, col::accent);
         std::lock_guard<std::mutex> s(g_statusMutex);
         g_statusText = msg;
@@ -602,23 +455,37 @@ static void startFeed() {
         }
     });
 
-    g_feedThread = std::thread([](std::shared_ptr<AlpacaWebSocket> c) {
-        c->run();
-    }, g_client);
+    // g_client is also read by stopFeed() and the destructor paths, so
+    // publish it under g_feedMutex and only kick off the thread after the
+    // shared_ptr is visible.
+    std::thread newThread;
+    {
+        std::lock_guard<std::mutex> lock(g_feedMutex);
+        g_client = client;
+        newThread = std::thread([client]() { client->run(); });
+        g_feedThread = std::move(newThread);
+    }
 
     logLine("Feed started for symbol " + sym, col::green);
 }
 
 static void stopFeed() {
-    std::lock_guard<std::mutex> lock(g_feedMutex);
-    if (!g_feedThread.joinable()) {
-        logLine("Feed is not running.", col::yellow);
-        return;
+    std::shared_ptr<AlpacaWebSocket> client;
+    {
+        std::lock_guard<std::mutex> lock(g_feedMutex);
+        if (!g_feedThread.joinable()) {
+            logLine("Feed is not running.", col::yellow);
+            return;
+        }
+        client = g_client;
     }
-    if (g_client) g_client->stop();
+    if (client) client->stop();
     g_feedThread.join();
-    g_feedThread = std::thread();
-    g_client.reset();
+    {
+        std::lock_guard<std::mutex> lock(g_feedMutex);
+        g_feedThread = std::thread();
+        g_client.reset();
+    }
     {
         std::lock_guard<std::mutex> s(g_statusMutex);
         g_statusText = "Stopped";
@@ -626,9 +493,6 @@ static void stopFeed() {
     }
     logLine("Feed stopped.", col::textDim);
 }
-
-
-
 
 static void processQuotes() {
     std::deque<OrderBook> batch;
@@ -638,21 +502,10 @@ static void processQuotes() {
     }
 
     for (const auto& q : batch) {
-        
         g_bookData.push_back(q);
         if (g_bookData.size() > 500) g_bookData.pop_front();
 
-        QuoteMetrics m = computeMetrics(q);
-        g_spreadSum += m.spread;
-        g_lastMid = m.mid;
-        updateFlowState(g_flow, q.bid, q.ask, q.bid_volume, q.ask_volume);
-        g_windowTicks++;
-        if (m.signal == "BUY")      g_buyCount++;
-        else if (m.signal == "SELL") g_sellCount++;
-        else                        g_neuCount++;
-        g_lastSignal = m.signal;
-        g_signalPrevMid = m.mid;
-        g_signalHasPrevMid = true;
+        QuoteMetrics m = g_core.onQuote(q);
 
         g_midHistory.push_back(m.mid);
         g_spreadHistory.push_back(m.spread);
@@ -662,6 +515,8 @@ static void processQuotes() {
         if (g_spreadHistory.size() > CHART_CAP) g_spreadHistory.pop_front();
         if (g_bidHistory.size() > CHART_CAP) g_bidHistory.pop_front();
         if (g_askHistory.size() > CHART_CAP) g_askHistory.pop_front();
+
+        g_lastSignal = m.signal;
 
         if (g_logEveryQuote) {
             auto now = std::chrono::steady_clock::now();
@@ -678,9 +533,6 @@ static void processQuotes() {
         }
     }
 }
-
-
-
 
 struct Layout {
     ImVec2 connPos, connSz;
@@ -733,8 +585,6 @@ static ImVec4 connectedColor(bool running) {
     return ImVec4(0.545f, 0.580f, 0.620f, 1.0f);
 }
 
-
-
 static bool g_forceLayout = true;
 
 static void applyPanelPlacement(const ImVec2& pos, const ImVec2& sz) {
@@ -752,9 +602,6 @@ static void centerHint(const char* text) {
 }
 
 static ImFont* g_bigFont = nullptr;
-
-
-
 
 static void drawMenuBar() {
     if (ImGui::BeginMainMenuBar()) {
@@ -788,7 +635,6 @@ static void drawMenuBar() {
                            "%s", g_lastSignal.c_str());
         ImGui::Separator();
 
-        // orders on/off toggle in the top bar
         const char* ordersBtn = g_settings.orderEnabled ? "Orders: ON" : "Orders: OFF";
         ImGui::PushStyleColor(ImGuiCol_Text, g_settings.orderEnabled
                                                 ? ImGui::ColorConvertU32ToFloat4(col::green)
@@ -811,9 +657,6 @@ static void drawMenuBar() {
         ImGui::EndMainMenuBar();
     }
 }
-
-
-
 
 static void drawConnectionPanel() {
     Layout L = layout();
@@ -860,7 +703,6 @@ static void drawConnectionPanel() {
     ImGui::SeparatorText("Trading");
     ImGui::TextDisabled("Settings apply from the next decision");
 
-    // clear on/off orders toggle (also shown in the menu bar)
     const bool ordersOn = g_settings.orderEnabled;
     if (ordersOn) {
         ImGui::PushStyleColor(ImGuiCol_Button, col::green);
@@ -881,25 +723,31 @@ static void drawConnectionPanel() {
     ImGui::DragFloat("SL multiplier", &g_settings.slMult, 0.1f, 0.5f, 10.0f, "%.2f");
 
     ImGui::SeparatorText("Expert thresholds");
-    if (ImGui::DragFloat("OFI", &g_settings.ofiThresh, 0.005f, 0.0f, 0.5f, "%.3f"))
-        OFI_THRESHOLD = g_settings.ofiThresh;
-    if (ImGui::DragFloat("Micro drift", &g_settings.driftThresh, 0.005f, 0.0f, 0.5f, "%.3f"))
-        DRIFT_THRESHOLD = g_settings.driftThresh;
-    if (ImGui::DragFloat("Absorption", &g_settings.absThresh, 0.005f, 0.0f, 0.5f, "%.3f"))
-        ABSORPTION_THRESHOLD = g_settings.absThresh;
+    Thresholds thr = g_core.thresholds();
+    float ofi = (float)thr.ofi;
+    float drift = (float)thr.drift;
+    float abs_ = (float)thr.absorption;
+    if (ImGui::DragFloat("OFI", &ofi, 0.005f, 0.0f, 0.5f, "%.3f")) {
+        thr.ofi = ofi; g_core.setThresholds(thr);
+    }
+    if (ImGui::DragFloat("Micro drift", &drift, 0.005f, 0.0f, 0.5f, "%.3f")) {
+        thr.drift = drift; g_core.setThresholds(thr);
+    }
+    if (ImGui::DragFloat("Absorption", &abs_, 0.005f, 0.0f, 0.5f, "%.3f")) {
+        thr.absorption = abs_; g_core.setThresholds(thr);
+    }
 
     ImGui::SeparatorText("Window");
-    ImGui::DragInt("Interval (minutes)", &g_settings.intervalMinutes, 1, 1, 60);
+    if (ImGui::DragInt("Interval (minutes)", &g_settings.intervalMinutes, 1, 1, 60)) {
+        g_core.setIntervalSeconds(g_settings.intervalMinutes * 60);
+    }
     if (ImGui::Button("Reset window", ImVec2(-1, 0))) {
-        resetWindow();
+        g_core.resetWindow();
         logLine("Window manually reset.", col::textDim);
     }
 
     ImGui::End();
 }
-
-
-
 
 static void drawChartPanel() {
     Layout L = layout();
@@ -1004,9 +852,6 @@ static void drawChartPanel() {
     ImGui::End();
 }
 
-
-
-
 static void drawMarketPanel() {
     Layout L = layout();
     applyPanelPlacement(L.marketPos, L.marketSz);
@@ -1043,7 +888,12 @@ static void drawMarketPanel() {
     }
 
     const OrderBook& q = g_bookData.back();
-    QuoteMetrics m = computeMetrics(q);
+    // recompute metrics purely for display; DecisionCore already updated
+    // its internal state via processQuotes()
+    SignalParams sp = g_core.signalParams();
+    static double prevMidForDisplay = 0.0;
+    static bool hasPrevMidForDisplay = false;
+    QuoteMetrics m = evaluateSignal(q, sp, prevMidForDisplay, hasPrevMidForDisplay);
 
     ImGui::TextUnformatted("MID");
     ImGui::SameLine();
@@ -1105,14 +955,15 @@ static void drawSignalPanel() {
     applyPanelPlacement(L.signalsPos, L.signalsSz);
     ImGui::Begin("Signals");
 
-    int buy = g_buyCount, sell = g_sellCount, neu = g_neuCount;
+    int buy = g_core.buyCount();
+    int sell = g_core.sellCount();
+    int neu = g_core.neuCount();
+    int ticks = g_core.tickCount();
 
-    auto now = std::chrono::steady_clock::now();
-    int intervalSec = g_settings.intervalMinutes * 60;
-    auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - g_windowStart).count();
-    int remaining = (int)std::max(0LL, (long long)intervalSec - elapsed);
+    int intervalSec = g_core.intervalSeconds();
+    int remaining = std::max(0, intervalSec - 1); // approx; windowElapsed() is the source of truth
 
-    ImGui::Text("Ticks: %d", g_windowTicks);
+    ImGui::Text("Ticks: %d", ticks);
     ImGui::Text("Decision in: %02d:%02d", remaining / 60, remaining % 60);
 
     ImGui::SeparatorText("Counts this window");
@@ -1120,7 +971,6 @@ static void drawSignalPanel() {
     ImGui::TextColored(colF(col::red),   "SELL    %d", sell);
     ImGui::TextColored(colF(col::yellow), "NEUTRAL %d", neu);
 
-    
     ImDrawList* dl = ImGui::GetWindowDrawList();
     ImVec2 a = ImGui::GetCursorScreenPos();
     float bw = ImGui::GetContentRegionAvail().x;
@@ -1153,13 +1003,15 @@ static void drawSignalPanel() {
     ImGui::TextColored(colF(signalColor(decision)), "%s", decision.c_str());
 
     ImGui::SeparatorText("Expert votes");
+    Thresholds thr = g_core.thresholds();
+    const FlowState& flow = g_core.flow();
     const std::string baseStr = majorityFromCounts(buy, sell, neu);
     const ExpertSignal baseVote = baseStr == "BUY"  ? ExpertSignal::BUY
                                 : baseStr == "SELL" ? ExpertSignal::SELL
                                                     : ExpertSignal::NEUTRAL;
-    const ExpertSignal ofiVote = ofiSignal(g_flow);
-    const ExpertSignal driftVote = driftSignal(g_flow);
-    const ExpertSignal absVote = absorptionSignal(g_flow);
+    const ExpertSignal ofiVote = ofiSignal(flow, thr);
+    const ExpertSignal driftVote = driftSignal(flow, thr);
+    const ExpertSignal absVote = absorptionSignal(flow, thr);
     const ExpertSignal combined = combinedDecision(baseVote, ofiVote, driftVote, absVote);
 
     ImGui::TextColored(colF(signalColor(expertName(baseVote))),  "Base        %s", expertName(baseVote));
@@ -1178,9 +1030,6 @@ static void drawSignalPanel() {
 
     ImGui::End();
 }
-
-
-
 
 static void drawDecisionPanel() {
     Layout L = layout();
@@ -1231,9 +1080,6 @@ static void drawDecisionPanel() {
     ImGui::End();
 }
 
-
-
-
 static void drawLogPanel() {
     Layout L = layout();
     applyPanelPlacement(L.logPos, L.logSz);
@@ -1270,9 +1116,6 @@ static void drawLogPanel() {
     ImGui::End();
 }
 
-
-
-
 static void glfwErrorCallback(int code, const char* desc) {
     std::string msg = "GLFW error (" + std::to_string(code) + "): "
                       + (desc ? desc : "?");
@@ -1295,8 +1138,6 @@ int main() {
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
 
-    
-    
     GLFWwindow* window = glfwCreateWindow(1600, 1000, "Flow++ - Alpaca trading GUI",
                                           nullptr, nullptr);
     if (!window) {
@@ -1346,7 +1187,6 @@ int main() {
     ImGui_ImplGlfw_InitForOpenGL(window, true);
     ImGui_ImplOpenGL3_Init("#version 330");
 
-    
     setOrderLogCallback([](const std::string& msg, bool isError) {
         logLine(msg, isError ? col::red : col::green);
     });
@@ -1354,7 +1194,6 @@ int main() {
     while (!glfwWindowShouldClose(window)) {
         glfwPollEvents();
 
-        
         if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS)
             glfwSetWindowShouldClose(window, true);
 
