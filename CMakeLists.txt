@@ -4,6 +4,14 @@ project(Flow++)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+if(NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE Release)
+endif()
+
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    add_compile_options(-Wall -Wextra -Wpedantic)
+endif()
+
 find_package(Boost REQUIRED COMPONENTS system)
 find_package(OpenSSL REQUIRED)
 find_package(nlohmann_json REQUIRED)
@@ -11,6 +19,8 @@ find_package(Threads REQUIRED)
 find_package(CURL REQUIRED)
 
 add_executable(flow main.cpp
+        core.h
+        core.cpp
         websocket.h
         websocket.cpp
         order.cpp
@@ -47,6 +57,8 @@ if(GLFW_FOUND AND OpenGL_FOUND)
     )
 
     add_executable(flow_gui gui.cpp
+            core.h
+            core.cpp
             websocket.h
             websocket.cpp
             order.cpp

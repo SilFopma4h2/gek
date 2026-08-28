@@ -16,8 +16,10 @@ MIT-style-ish, but shorter. You may use, modify and share the code as long as yo
 
 | File | What it does |
 |---|---|
-| `main.cpp` | Entry point (console version), order-book storage, signal logic, threading |
-| `gui.cpp` | Entry point for the GUI version (`flow_gui`); same logic as `main.cpp`, in a Dear ImGui UI |
+| `core.h` / `core.cpp` | Shared signal logic: `OrderBook`, `evaluateSignal`, `majorityFromCounts`, `DecisionCore` (window state + tallies) |
+| `main.cpp` | Entry point (console version): websocket thread, decision loop, signal throttling |
+| `gui.cpp` | Entry point for the GUI version (`flow_gui`); uses `core::DecisionCore` for all signal/decide state |
+| `experts.h` | OFI / micro-drift / absorption experts and the `combinedDecision` vote |
 | `websocket.h` / `websocket.cpp` | Connects, authenticates and subscribes to Alpaca's websocket (Boost.Beast + OpenSSL) |
 | `order.h` / `order.cpp` | Place orders via the Alpaca REST API (libcurl) |
 | `logger.h` / `logger.cpp` | Appends every error to `error.log` (thread-safe, timestamped) |
@@ -192,8 +194,6 @@ A Dear ImGui + GLFW + OpenGL UI covering everything `main.cpp` does:
 - **Signals**: current signal, per-signal counts in the current window, countdown to the next decision and a "Decide now" button.
 - **Decisions**: a table of recent decisions (time, majority, entry/TP/SL, order status).
 - **Log**: scrolling, colored log (feed status, quotes, decisions, order results) with autoscroll and a "log every quote" toggle.
-
-Same timing as `main.cpp`: the decision fires as soon as the interval (default 5 minutes) elapses, and the majority signal decides whether an order is placed. Orders run on a worker thread so the UI doesn't stall.
 
 Same timing as `main.cpp`: the decision fires as soon as the interval (default 5 minutes) elapses, and the majority signal decides whether an order is placed. Orders run on a worker thread so the UI doesn't stall.
 
